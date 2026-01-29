@@ -38,11 +38,9 @@ pipeline {
           dir('terraform') {
             sh '''
               terraform --version || true
-              terraform fmt -recursive
-              terraform init -input=false
-              terraform validate
-              terraform plan -input=false -out=tfplan
-              terraform apply -input=false -auto-approve tfplan
+              terraform init 
+              terraform plan
+              terraform apply -auto-approve tfplan
             '''
           }
         }
