@@ -1,0 +1,5 @@
+
+[webservers]
+%{ for i, ip in enumerate(private_ips) ~}
+${ip} ansible_user=ubuntu ansible_ssh_common_args='-o StrictHostKeyChecking=no' # ansible_host=${public_ips[i]}  # <- uncomment if Jenkins cannot reach private IPs
+%{ endfor ~}
