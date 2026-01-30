@@ -1,4 +1,3 @@
-
 pipeline {
   agent any
 
@@ -36,17 +35,23 @@ pipeline {
                                           usernameVariable: 'AWS_ACCESS_KEY_ID',
                                           passwordVariable: 'AWS_SECRET_ACCESS_KEY')]) {
           dir('terraform') {
-            sh '''
-              terraform --version || true
-              terraform init 
-              terraform plan
-              terraform apply -auto-approve tfplan
-            '''
+            retry(2) {
+              sh '''
+                terraform --version || true
+                terraform init 
+                terraform plan -out=tfplan
+                terraform apply -auto-approve tfplan
+              '''
+            }
           }
         }
         sh '''
           echo "==== Generated Ansible Inventory (hosts.ini) ===="
-          cat ansible-playbooks/inventory/hosts.ini || true
+          if [ -f ansible-playbooks/inventory/hosts.ini ]; then
+            cat ansible-playbooks/inventory/hosts.ini
+          else
+            echo "Inventory file not found!"
+          fi
           echo "==============================================="
         '''
       }
@@ -69,10 +74,12 @@ pipeline {
         sshagent(credentials: ['vm-ssh-key']) {
           dir('ansible-playbooks') {
             withEnv(["WEB_SOURCE_DIR=${env.WORKSPACE}/web-src"]) {
-              sh '''
-                ansible --version || true
-                ansible-playbook -i inventory/hosts.ini -u ubuntu deploy.yml
-              '''
+              retry(2) {
+                sh '''
+                  ansible --version || true
+                  ansible-playbook -i inventory/hosts.ini -u ubuntu deploy.yml
+                '''
+              }
             }
           }
         }
@@ -87,7 +94,9 @@ pipeline {
                                           usernameVariable: 'AWS_ACCESS_KEY_ID',
                                           passwordVariable: 'AWS_SECRET_ACCESS_KEY')]) {
           dir('terraform') {
-            sh 'terraform destroy -auto-approve'
+            retry(2) {
+              sh 'terraform destroy -auto-approve'
+            }
           }
         }
       }
