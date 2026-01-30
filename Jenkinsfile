@@ -5,7 +5,7 @@ pipeline {
  
   environment {
     AWS_DEFAULT_REGION = 'ap-south-1'
-    JENKINS_IP        = 'http://13.233.224.234:8080/'  // Used as a TF var if needed
+    JENKINS_IP        = 'http://13.201.85.232:8080/'  // Used as a TF var if needed
   }
  
   stages {
