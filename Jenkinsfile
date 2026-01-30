@@ -1,9 +1,7 @@
 pipeline {
   agent any
  
-  options {
-    timestamps()
-  }
+  options { timestamps() }
  
   environment {
     AWS_DEFAULT_REGION = 'ap-south-1'
@@ -12,7 +10,6 @@ pipeline {
   }
  
   stages {
- 
     stage('Cleanup Workspace') {
       steps { cleanWs() }
     }
@@ -35,56 +32,6 @@ pipeline {
             }
           }
         }
-      }
-    }
- 
-    stage('Preflight: Ensure Terraform & Ansible Installed') {
-      steps {
-        sh '''
-          set -e
- 
-          echo "Checking terraform..."
-          if ! command -v terraform >/dev/null 2>&1; then
-            echo "Terraform not found. Installing..."
-            if [ -f /etc/os-release ]; then
-              . /etc/os-release
-              if echo "$ID $NAME" | grep -qi "amzn\\|amazon"; then
-                sudo yum install -y yum-utils
-                sudo yum-config-manager --add-repo https://rpm.releases.hashicorp.com/AmazonLinux/hashicorp.repo
-                sudo yum -y install terraform
-              elif echo "$ID $NAME" | grep -qi "ubuntu"; then
-                sudo apt-get update
-                sudo apt-get install -y gnupg software-properties-common
-                curl -fsSL https://apt.releases.hashicorp.com/gpg | sudo apt-key add -
-                sudo apt-add-repository "deb [arch=amd64] https://apt.releases.hashicorp.com $(lsb_release -cs) main"
-                sudo apt-get update && sudo apt-get install -y terraform
-              else
-                echo "Unsupported OS. Please install Terraform manually."; exit 1
-              fi
-            fi
-          fi
-          terraform -version
- 
-          echo "Checking ansible..."
-          if ! command -v ansible >/dev/null 2>&1; then
-            echo "Ansible not found. Installing..."
-            if [ -f /etc/os-release ]; then
-              . /etc/os-release
-              if echo "$ID $NAME" | grep -qi "amzn\\|amazon"; then
-                sudo amazon-linux-extras enable ansible2 || true
-                sudo yum clean metadata
-                sudo yum -y install ansible
-              elif echo "$ID $NAME" | grep -qi "ubuntu"; then
-                sudo apt-get update && sudo apt-get install -y ansible
-              else
-                echo "Unsupported OS. Please install Ansible manually."; exit 1
-              fi
-            fi
-          fi
-          ansible --version
- 
-          echo "Preflight complete."
-        '''
       }
     }
  
