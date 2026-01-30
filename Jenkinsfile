@@ -3,7 +3,6 @@ pipeline {
  
   options {
     timestamps()
-    ansiColor('xterm')
   }
  
   environment {
@@ -93,9 +92,9 @@ pipeline {
           sh 'terraform output -json > ../ansible-playbooks/inventory/tf-outputs.json'
         }
         script {
-          def tfJson = readFile("infra-ansible/ansible-playbooks/inventory/tf-outputs.json")
+          def tfJson  = readFile("infra-ansible/ansible-playbooks/inventory/tf-outputs.json")
           def slurper = new groovy.json.JsonSlurperClassic()
-          def obj = slurper.parseText(tfJson)
+          def obj     = slurper.parseText(tfJson)
  
           def apacheIps = obj.apache_public_ips?.value ?: []
           def nginxIps  = obj.nginx_public_ips?.value  ?: []
@@ -136,7 +135,7 @@ pipeline {
           dir('infra-ansible/ansible-playbooks') {
             sh '''
               export ANSIBLE_HOST_KEY_CHECKING=${ANSIBLE_HOST_KEY_CHECKING}
-              # We reference webapp/ content via a relative path
+              # Pass webapp dir so playbook can copy index.html
               ansible-playbook -i inventory/hosts.ini deploy.yml -e "webapp_dir=${WORKSPACE}/webapp"
             '''
           }
