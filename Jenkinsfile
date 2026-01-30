@@ -9,10 +9,6 @@ pipeline {
   environment {
     AWS_DEFAULT_REGION = 'ap-south-1'
     JENKINS_IP        = 'http://13.233.224.234:8080/'
-    WEBAPP_DIR        = "${WORKSPACE}/webapp"
-    TERRAFORM_DIR     = "${WORKSPACE}/terraform"
-    ANSIBLE_DIR       = "${WORKSPACE}/ansible-playbooks"
-    // Optional: disable Ansible host key checking
     ANSIBLE_HOST_KEY_CHECKING = 'False'
   }
  
@@ -24,40 +20,28 @@ pipeline {
  
     stage('Checkout Repositories') {
       parallel {
-        stage('Webapp') {
-          steps {
-            dir('webapp') {
-              // If repo is public, you can remove credentialsId
-              git branch: 'main',
-                  credentialsId: 'gitSCM',
-                  url: 'https://github.com/Krish-venom/Weather-site.git'
-            }
-          }
-        }
-        stage('Infra (Terraform + Ansible)') {
+        stage('Checkout Infra (terraform + ansible)') {
           steps {
             dir('infra-ansible') {
               git branch: 'main',
-                  credentialsId: 'gitSCM',
                   url: 'https://github.com/Krish-venom/infra-ansible.git'
             }
           }
         }
-      }
-    }
- 
-    stage('Prepare Folders') {
-      steps {
-        sh '''
-          ln -sfn ${WORKSPACE}/infra-ansible/terraform ${WORKSPACE}/terraform
-          ln -sfn ${WORKSPACE}/infra-ansible/ansible-playbooks ${WORKSPACE}/ansible-playbooks
-        '''
+        stage('Checkout Web (Weather-site)') {
+          steps {
+            dir('webapp') {
+              git branch: 'main',
+                  url: 'https://github.com/Krish-venom/Weather-site.git'
+            }
+          }
+        }
       }
     }
  
     stage('Terraform Init') {
       steps {
-        dir('terraform') {
+        dir('infra-ansible/terraform') {
           sh 'terraform init'
         }
       }
@@ -65,7 +49,7 @@ pipeline {
  
     stage('Terraform Validate') {
       steps {
-        dir('terraform') {
+        dir('infra-ansible/terraform') {
           sh 'terraform validate'
         }
       }
@@ -73,19 +57,19 @@ pipeline {
  
     stage('Terraform Plan') {
       steps {
-        dir('terraform') {
-          sh '''
-            terraform plan \
-              -var="jenkins_ip=${JENKINS_IP}" \
+        dir('infra-ansible/terraform') {
+          sh """
+            terraform plan \\
+              -var="jenkins_ip=${JENKINS_IP}" \\
               -out=tfplan
-          '''
+          """
         }
       }
     }
  
     stage('Approval') {
       steps {
-        input message: 'Deploy 4 EC2 instances (2 Apache + 2 Nginx)?',
+        input message: 'Proceed to deploy 4 EC2 instances (2 Apache + 2 Nginx)?',
               ok: 'Deploy',
               submitter: 'admin'
       }
@@ -93,8 +77,7 @@ pipeline {
  
     stage('Terraform Apply') {
       steps {
-        dir('terraform') {
-          // Using the saved plan; no additional -auto-approve required
+        dir('infra-ansible/terraform') {
           sh 'terraform apply tfplan'
         }
       }
@@ -106,20 +89,17 @@ pipeline {
  
     stage('Generate Ansible Inventory (from Terraform outputs)') {
       steps {
-        dir('terraform') {
+        dir('infra-ansible/terraform') {
           sh 'terraform output -json > ../ansible-playbooks/inventory/tf-outputs.json'
         }
         script {
-          // Parse JSON and create hosts.ini using Groovy (no extra plugins needed)
-          def jsonText = readFile("${ANSIBLE_DIR}/inventory/tf-outputs.json")
-          def slurper  = new groovy.json.JsonSlurperClassic()
-          def obj      = slurper.parseText(jsonText)
+          def tfJson = readFile("infra-ansible/ansible-playbooks/inventory/tf-outputs.json")
+          def slurper = new groovy.json.JsonSlurperClassic()
+          def obj = slurper.parseText(tfJson)
  
-          // Terraform outputs: apache_public_ips & nginx_public_ips must exist
           def apacheIps = obj.apache_public_ips?.value ?: []
           def nginxIps  = obj.nginx_public_ips?.value  ?: []
  
-          // Build INI content
           def ini = new StringBuilder()
           ini.append("[apache]\n")
           apacheIps.each { ip -> ini.append("${ip} ansible_user=ec2-user\n") }
@@ -127,13 +107,10 @@ pipeline {
           nginxIps.each { ip -> ini.append("${ip} ansible_user=ec2-user\n") }
           ini.append("\n[all:vars]\n")
           ini.append("ansible_python_interpreter=/usr/bin/python3\n")
-          // You can omit the next line because we use sshagent
-          // ini.append("ansible_ssh_private_key_file=~/.ssh/webserver-deploy-key\n")
  
-          writeFile file: "${ANSIBLE_DIR}/inventory/hosts.ini", text: ini.toString()
+          writeFile file: "infra-ansible/ansible-playbooks/inventory/hosts.ini", text: ini.toString()
         }
-        // Show inventory for debugging
-        dir('ansible-playbooks') {
+        dir('infra-ansible/ansible-playbooks') {
           sh 'echo "===== Generated hosts.ini ====="; cat inventory/hosts.ini'
         }
       }
@@ -141,8 +118,9 @@ pipeline {
  
     stage('Test SSH Connectivity') {
       steps {
+        // Uses Jenkins credential ID: webserver-deploy-key (SSH Username with private key; username ec2-user)
         sshagent(credentials: ['webserver-deploy-key']) {
-          dir('ansible-playbooks') {
+          dir('infra-ansible/ansible-playbooks') {
             sh '''
               export ANSIBLE_HOST_KEY_CHECKING=${ANSIBLE_HOST_KEY_CHECKING}
               ansible -i inventory/hosts.ini all -m ping
@@ -152,13 +130,14 @@ pipeline {
       }
     }
  
-    stage('Deploy Application') {
+    stage('Deploy with Ansible') {
       steps {
         sshagent(credentials: ['webserver-deploy-key']) {
-          dir('ansible-playbooks') {
+          dir('infra-ansible/ansible-playbooks') {
             sh '''
               export ANSIBLE_HOST_KEY_CHECKING=${ANSIBLE_HOST_KEY_CHECKING}
-              ansible-playbook -i inventory/hosts.ini deploy.yml
+              # We reference webapp/ content via a relative path
+              ansible-playbook -i inventory/hosts.ini deploy.yml -e "webapp_dir=${WORKSPACE}/webapp"
             '''
           }
         }
@@ -167,18 +146,19 @@ pipeline {
  
     stage('Deployment Info') {
       steps {
-        dir('terraform') {
-          sh '''
-            echo "===== Terraform Outputs ====="
-            terraform output
-          '''
+        dir('infra-ansible/terraform') {
+          sh 'terraform output'
         }
       }
     }
   }
  
   post {
-    success { echo '✅ PIPELINE COMPLETED SUCCESSFULLY' }
-    failure { echo '❌ PIPELINE FAILED' }
+    always {
+      echo 'Pipeline finished.'
+      archiveArtifacts artifacts: 'infra-ansible/ansible-playbooks/inventory/hosts.ini, infra-ansible/terraform/*.tf, infra-ansible/terraform/tfplan', onlyIfSuccessful: false
+    }
+    success { echo '✅ Success!' }
+    failure { echo '❌ Build failed. Check logs above.' }
   }
 }
