@@ -1,5 +1,3 @@
-# outputs.tf
-
 output "vpc_id" {
   description = "ID of the VPC"
   value       = aws_vpc.main.id
@@ -18,7 +16,6 @@ output "security_group_id" {
 ###################
 # Apache Outputs
 ###################
-
 output "apache_instance_ids" {
   description = "List of Apache EC2 instance IDs"
   value       = aws_instance.apache[*].id
@@ -42,7 +39,6 @@ output "apache_urls" {
 ###################
 # Nginx Outputs
 ###################
-
 output "nginx_instance_ids" {
   description = "List of Nginx EC2 instance IDs"
   value       = aws_instance.nginx[*].id
@@ -66,7 +62,6 @@ output "nginx_urls" {
 ###################
 # Combined Outputs
 ###################
-
 output "all_server_ips" {
   description = "All server IP addresses"
   value = {
