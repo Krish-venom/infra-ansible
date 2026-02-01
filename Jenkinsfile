@@ -1,7 +1,3 @@
-// === Jenkinsfile (full) ===
-// Uses the fixed key name from Terraform: deploy-key.pem
-// No placeholders, no failing checks. It also normalizes to a stable symlink keys/current.pem.
-
 pipeline {
   agent any
 
@@ -21,16 +17,10 @@ pipeline {
 
   environment {
     AWS_DEFAULT_REGION = 'ap-south-1'
-    JENKINS_IP = '3.110.120.129'      // bare IP only
-
+    JENKINS_IP = '3.110.120.129'   // bare IP only
     TF_DIR = 'infra-ansible/terraform'
-
-    // Will be overwritten after apply by TF outputs (absolute paths)
     INVENTORY_FILE = 'infra-ansible/ansible-playbooks/inventory/hosts.ini'
-
-    // We’ll normalize a stable symlink after apply
-    PRIVATE_KEY = 'infra-ansible/ansible-playbooks/keys/current.pem'
-
+    PRIVATE_KEY    = 'infra-ansible/ansible-playbooks/keys/current.pem'
     APP_SRC_DIR = 'app-src'
     ANSIBLE_HOST_KEY_CHECKING = 'False'
   }
@@ -54,10 +44,7 @@ pipeline {
         withCredentials([usernamePassword(credentialsId: 'aws_creds',
           passwordVariable: 'AWS_SECRET_ACCESS_KEY', usernameVariable: 'AWS_ACCESS_KEY_ID')]) {
           dir("${TF_DIR}") {
-            sh '''
-              set -e
-              terraform init -input=false
-            '''
+            sh 'set -e; terraform init -input=false'
           }
         }
       }
@@ -66,11 +53,7 @@ pipeline {
     stage('Terraform Validate & Fmt') {
       steps {
         dir("${TF_DIR}") {
-          sh '''
-            set -e
-            terraform fmt -check || true
-            terraform validate
-          '''
+          sh 'set -e; terraform fmt -check || true; terraform validate'
         }
       }
     }
@@ -109,11 +92,7 @@ pipeline {
           dir("${TF_DIR}") {
             script {
               if (params.WORKFLOW == 'apply') {
-                sh '''
-                  set -e
-                  test -f tfplan || { echo "tfplan not found. Run Plan first."; exit 1; }
-                  terraform apply -input=false tfplan
-                '''
+                sh 'set -e; test -f tfplan || { echo "tfplan not found"; exit 1; }; terraform apply -input=false tfplan'
               } else {
                 sh """
                   set -e
@@ -129,7 +108,7 @@ pipeline {
       }
     }
 
-    // Fetch outputs and normalize to a stable symlink keys/current.pem
+    // Normalize: symlink keys/current.pem -> <fixed> deploy-key.pem & ensure inventory references ../keys/current.pem
     stage('Normalize inventory & key (apply only)') {
       when { expression { params.WORKFLOW == 'apply' } }
       steps {
@@ -138,20 +117,17 @@ pipeline {
             script: "terraform -chdir=${TF_DIR} output -raw generated_private_key_path",
             returnStdout: true
           ).trim()
-
           env.INVENTORY_FILE = sh(
             script: "terraform -chdir=${TF_DIR} output -raw inventory_path",
             returnStdout: true
           ).trim()
-
           env.EFFECTIVE_KEY_NAME = sh(
             script: "terraform -chdir=${TF_DIR} output -raw effective_keypair_name",
             returnStdout: true
           ).trim()
-
-          echo "[INFO] TF → key path : ${env.PRIVATE_KEY_ABS}"
-          echo "[INFO] TF → inventory: ${env.INVENTORY_FILE}"
-          echo "[INFO] TF → keypair  : ${env.EFFECTIVE_KEY_NAME}"
+          echo "[INFO] key path : ${env.PRIVATE_KEY_ABS}"
+          echo "[INFO] inventory: ${env.INVENTORY_FILE}"
+          echo "[INFO] keypair  : ${env.EFFECTIVE_KEY_NAME}"
         }
 
         sh '''
@@ -165,8 +141,7 @@ pipeline {
             echo "[INFO] Linked ${KEY_LINK} -> ${PRIVATE_KEY_ABS}"
             echo "PRIVATE_KEY=${KEY_LINK}" > ${WORKSPACE}/.env_keylink
           else
-            echo "[WARN] Private key path missing or not found ('${PRIVATE_KEY_ABS}'). Setting stable link path anyway."
-            # Keep a stable path to avoid placeholder errors; Ansible may fail if truly missing.
+            echo "[WARN] Private key path missing or not found ('${PRIVATE_KEY_ABS}'). Creating empty stable link."
             KEY_LINK="infra-ansible/ansible-playbooks/keys/current.pem"
             mkdir -p "$(dirname "${KEY_LINK}")"
             touch "${KEY_LINK}"
@@ -174,25 +149,22 @@ pipeline {
             echo "PRIVATE_KEY=${KEY_LINK}" > ${WORKSPACE}/.env_keylink
           fi
 
-          # Update inventory to use the stable link ../keys/current.pem when present
+          # Ensure inventory points to ../keys/current.pem (it already does from TF, but keep idempotent)
           if [ -n "${INVENTORY_FILE}" ] && [ -f "${INVENTORY_FILE}" ]; then
             sed -i 's|ansible_ssh_private_key_file=\\?\\.?/\\?\\.?/\\?keys/[^[:space:]]*|ansible_ssh_private_key_file=../keys/current.pem|g' "${INVENTORY_FILE}" || true
-            echo "[INFO] Updated inventory to use ../keys/current.pem"
+            echo "[INFO] Inventory updated to use ../keys/current.pem"
           else
-            echo "[WARN] Inventory not found ('${INVENTORY_FILE}'). Continuing."
+            echo "[WARN] Inventory not found ('${INVENTORY_FILE}')."
           fi
         '''
 
         script {
           def envFile = "${env.WORKSPACE}/.env_keylink"
           if (fileExists(envFile)) {
-            def content = readFile(envFile).split('\n')
-            content.each { line ->
+            readFile(envFile).split('\n').each { line ->
               if (line?.trim()) {
                 def kv = line.split('=', 2)
-                if (kv.size() == 2) {
-                  env[(kv[0].trim())] = kv[1].trim()
-                }
+                if (kv.size() == 2) env[(kv[0].trim())] = kv[1].trim()
               }
             }
           }
@@ -208,14 +180,14 @@ pipeline {
         sh '''
           set +e
           if ! command -v ansible >/dev/null 2>&1; then
-            echo "[WARN] Ansible not found. Installing..."
+            echo "[WARN] Installing Ansible..."
             if command -v apt-get >/dev/null 2>&1; then
               sudo apt-get update && sudo apt-get install -y ansible
             elif command -v yum >/dev/null 2>&1; then
               sudo yum install -y epel-release || true
               sudo yum install -y ansible || true
             else
-              echo "[ERROR] Could not install Ansible automatically. Please install Ansible on the Jenkins agent."
+              echo "[ERROR] Install Ansible on this agent."
               exit 1
             fi
           fi
@@ -258,7 +230,7 @@ pipeline {
           rm -f "$TAR"
           tar -C "${APP_SRC_DIR}" -czf "$TAR" .
 
-          # Apache (Debian/Ubuntu path, then RHEL fallback)
+          # Apache (Ubuntu path then RHEL fallback)
           ansible apache -i "${INVENTORY_FILE}" -m unarchive \
             -a "src=${WORKSPACE}/$TAR dest=/var/www/html/ remote_src=no owner=www-data group=www-data mode=0644" -vv || \
           ansible apache -i "${INVENTORY_FILE}" -m unarchive \
