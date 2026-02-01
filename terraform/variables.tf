@@ -16,6 +16,20 @@ variable "project_name" {
   default     = "devops-webapp"
 }
 
+# 👉 Your existing default VPC ID here
+variable "vpc_id" {
+  description = "Existing VPC ID to deploy into (e.g., default VPC)"
+  type        = string
+  default     = "vpc-0bb695c41dc9db0a4"
+}
+
+# Optional: specify a particular subnet ID in that VPC; leave empty to auto-pick first
+variable "subnet_id" {
+  description = "Existing subnet ID in the VPC; if empty, the first subnet in that VPC is used"
+  type        = string
+  default     = ""
+}
+
 # Base key pair name; random suffix added to avoid duplicates
 variable "keypair_name" {
   description = "Base name for the generated AWS key pair and local key files"
