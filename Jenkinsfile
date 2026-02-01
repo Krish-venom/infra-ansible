@@ -9,29 +9,30 @@ pipeline {
 
   parameters {
     choice(name: 'WORKFLOW', choices: ['apply', 'destroy'], description: 'Select Terraform workflow')
-    string(name: 'VPC_ID', defaultValue: 'vpc-0bb695c41dc9db0a4', description: 'Existing VPC ID to deploy into')
-    string(name: 'SUBNET_ID', defaultValue: '', description: 'Optional: specific subnet ID in the VPC (leave empty to auto-pick)')
+    string(name: 'VPC_ID', defaultValue: 'vpc-0bb695c41dc9db0a4', description: 'Existing VPC ID to deploy into (default VPC)')
+    string(name: 'SUBNET_ID', defaultValue: '', description: 'Optional: specific subnet in the VPC (leave empty to auto-pick first)')
     string(name: 'APP_REPO_URL', defaultValue: 'https://github.com/your-org/your-app.git', description: 'Git URL of the application to deploy')
     string(name: 'APP_REPO_BRANCH', defaultValue: 'main', description: 'Branch to deploy')
   }
 
   environment {
+    // Region must match your TF default or be passed via var
     AWS_DEFAULT_REGION = 'ap-south-1'
 
     // IMPORTANT: bare IP only (no http://, no port)
     JENKINS_IP = '3.110.120.129'
 
-    // Terraform directory
+    // Terraform directory in your repo
     TF_DIR = 'infra-ansible/terraform'
 
-    // Placeholders; will be overwritten by TF outputs (absolute paths)
+    // These will be replaced after apply by TF outputs (absolute paths)
     INVENTORY_FILE = 'infra-ansible/ansible-playbooks/inventory/hosts.ini'
-    PRIVATE_KEY    = 'infra-ansible/ansible-playbooks/keys/devops-generated-key-XXXX.pem'
+    PRIVATE_KEY    = 'infra-ansible/ansible-playbooks/keys/devops-generated-key-PLACEHOLDER.pem'
 
-    // App checkout destination
+    // Clone app code here
     APP_SRC_DIR = 'app-src'
 
-    // Disable SSH host key checking
+    // Disable SSH host key prompts during first connect
     ANSIBLE_HOST_KEY_CHECKING = 'False'
   }
 
@@ -44,7 +45,7 @@ pipeline {
     stage('Checkout Infra Repo') {
       steps {
         dir('infra-ansible') {
-          // Add credentialsId if private: credentialsId: 'github_creds'
+          // If private, add: credentialsId: 'github_creds'
           git branch: 'main', url: 'https://github.com/Krish-venom/infra-ansible.git'
         }
       }
@@ -155,7 +156,7 @@ pipeline {
 
           echo "[INFO] Using private key: ${env.PRIVATE_KEY}"
           echo "[INFO] Inventory file: ${env.INVENTORY_FILE}"
-          echo "[INFO] Effective key pair name: ${env.EFFECTIVE_KEY_NAME}"
+          echo "[INFO] Effective keypair: ${env.EFFECTIVE_KEY_NAME}"
         }
       }
     }
@@ -166,12 +167,13 @@ pipeline {
       steps {
         sh '''
           set -e
-          echo "[INFO] Checking inventory & key from Terraform..."
+          echo "[INFO] Checking inventory & key from Terraform outputs..."
           test -f "${INVENTORY_FILE}" || { echo "Inventory not found: ${INVENTORY_FILE}"; exit 2; }
           test -f "${PRIVATE_KEY}"    || { echo "Private key not found: ${PRIVATE_KEY}"; exit 3; }
           chmod 600 "${PRIVATE_KEY}"
           echo "[INFO] Inventory preview:"
           sed -n '1,200p' "${INVENTORY_FILE}" || true
+          echo "[INFO] Private key path: ${PRIVATE_KEY}"
         '''
       }
     }
@@ -216,6 +218,7 @@ pipeline {
       steps {
         sh '''
           set -e
+          # Inventory already carries ansible_user + key path
           ansible all -i "${INVENTORY_FILE}" -m ping -vv || {
             echo "[ERROR] Ansible ping failed. Check SSH & SG rules."
             exit 1
@@ -233,7 +236,7 @@ pipeline {
           rm -f "$TAR"
           tar -C "${APP_SRC_DIR}" -czf "$TAR" .
 
-          # Push to Apache group (Debian/Ubuntu default; fallback for RHEL path)
+          # Push to Apache servers (Debian/Ubuntu default; fallback for RHEL path)
           ansible apache -i "${INVENTORY_FILE}" -m unarchive \
             -a "src=${WORKSPACE}/$TAR dest=/var/www/html/ remote_src=no owner=www-data group=www-data mode=0644" -vv || \
           ansible apache -i "${INVENTORY_FILE}" -m unarchive \
@@ -243,7 +246,7 @@ pipeline {
           ansible apache -i "${INVENTORY_FILE}" -m service -a "name=apache2 state=restarted" || \
           ansible apache -i "${INVENTORY_FILE}" -m service -a "name=httpd state=restarted" || true
 
-          # Push to Nginx group (common roots)
+          # Push to Nginx servers (common roots)
           ansible nginx -i "${INVENTORY_FILE}" -m unarchive \
             -a "src=${WORKSPACE}/$TAR dest=/usr/share/nginx/html/ remote_src=no owner=nginx group=nginx mode=0644" -vv || \
           ansible nginx -i "${INVENTORY_FILE}" -m unarchive \
