@@ -9,6 +9,8 @@ pipeline {
 
   parameters {
     choice(name: 'WORKFLOW', choices: ['apply', 'destroy'], description: 'Select Terraform workflow')
+    string(name: 'VPC_ID', defaultValue: 'vpc-0bb695c41dc9db0a4', description: 'Existing VPC ID to deploy into')
+    string(name: 'SUBNET_ID', defaultValue: '', description: 'Optional: specific subnet ID in the VPC (leave empty to auto-pick)')
     string(name: 'APP_REPO_URL', defaultValue: 'https://github.com/your-org/your-app.git', description: 'Git URL of the application to deploy')
     string(name: 'APP_REPO_BRANCH', defaultValue: 'main', description: 'Branch to deploy')
   }
@@ -22,7 +24,7 @@ pipeline {
     // Terraform directory
     TF_DIR = 'infra-ansible/terraform'
 
-    // Placeholder; will be overwritten by TF outputs (absolute paths)
+    // Placeholders; will be overwritten by TF outputs (absolute paths)
     INVENTORY_FILE = 'infra-ansible/ansible-playbooks/inventory/hosts.ini'
     PRIVATE_KEY    = 'infra-ansible/ansible-playbooks/keys/devops-generated-key-XXXX.pem'
 
@@ -87,6 +89,8 @@ pipeline {
               terraform plan \\
                 -input=false \\
                 -var="jenkins_ip=${JENKINS_IP}" \\
+                -var="vpc_id=${VPC_ID}" \\
+                -var="subnet_id=${SUBNET_ID}" \\
                 -out=tfplan
             """
           }
@@ -118,7 +122,9 @@ pipeline {
                 sh """
                   set -e
                   terraform destroy -auto-approve -input=false \\
-                    -var="jenkins_ip=${JENKINS_IP}"
+                    -var="jenkins_ip=${JENKINS_IP}" \\
+                    -var="vpc_id=${VPC_ID}" \\
+                    -var="subnet_id=${SUBNET_ID}"
                 """
               }
             }
@@ -210,7 +216,6 @@ pipeline {
       steps {
         sh '''
           set -e
-          # Inventory already carries ansible_user + key path
           ansible all -i "${INVENTORY_FILE}" -m ping -vv || {
             echo "[ERROR] Ansible ping failed. Check SSH & SG rules."
             exit 1
@@ -228,17 +233,17 @@ pipeline {
           rm -f "$TAR"
           tar -C "${APP_SRC_DIR}" -czf "$TAR" .
 
-          # Push to Apache servers (Debian/Ubuntu default; fallback for RHEL paths)
+          # Push to Apache group (Debian/Ubuntu default; fallback for RHEL path)
           ansible apache -i "${INVENTORY_FILE}" -m unarchive \
             -a "src=${WORKSPACE}/$TAR dest=/var/www/html/ remote_src=no owner=www-data group=www-data mode=0644" -vv || \
           ansible apache -i "${INVENTORY_FILE}" -m unarchive \
             -a "src=${WORKSPACE}/$TAR dest=/usr/share/httpd/noindex/ remote_src=no owner=apache group=apache mode=0644" -vv || true
 
-          # Restart Apache service
+          # Restart Apache
           ansible apache -i "${INVENTORY_FILE}" -m service -a "name=apache2 state=restarted" || \
           ansible apache -i "${INVENTORY_FILE}" -m service -a "name=httpd state=restarted" || true
 
-          # Push to Nginx servers (try common roots)
+          # Push to Nginx group (common roots)
           ansible nginx -i "${INVENTORY_FILE}" -m unarchive \
             -a "src=${WORKSPACE}/$TAR dest=/usr/share/nginx/html/ remote_src=no owner=nginx group=nginx mode=0644" -vv || \
           ansible nginx -i "${INVENTORY_FILE}" -m unarchive \
