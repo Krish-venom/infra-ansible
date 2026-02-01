@@ -16,8 +16,9 @@ variable "project_name" {
   default     = "devops-webapp"
 }
 
+# Base key pair name; a random suffix is appended to avoid duplicates
 variable "keypair_name" {
-  description = "Name for the generated AWS key pair and local key files"
+  description = "Base name for the generated AWS key pair and local key files"
   type        = string
   default     = "devops-generated-key"
 }
