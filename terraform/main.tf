@@ -61,6 +61,19 @@ variable "subnet_id" {
   default     = ""
 }
 
+# Reuse existing SG or create a new one
+variable "reuse_existing_sg" {
+  description = "Reuse an existing SG named existing_sg_name in the selected VPC (true) or create a new one (false)"
+  type        = bool
+  default     = true
+}
+
+variable "existing_sg_name" {
+  description = "Existing security group name in the VPC to reuse when reuse_existing_sg=true"
+  type        = string
+  default     = "web-server-sg"
+}
+
 # Base key pair name; a random suffix is added to avoid duplicates
 variable "keypair_name" {
   description = "Base name for the generated AWS key pair and local key files"
@@ -148,6 +161,21 @@ data "aws_subnets" "in_vpc" {
   }
 }
 
+# Reuse an existing SG by name in this VPC (when toggled on)
+data "aws_security_group" "existing_web" {
+  count = var.reuse_existing_sg ? 1 : 0
+
+  filter {
+    name   = "group-name"
+    values = [var.existing_sg_name]
+  }
+
+  filter {
+    name   = "vpc-id"
+    values = [data.aws_vpc.selected.id]
+  }
+}
+
 ################################
 # ---------- Locals ----------
 ################################
@@ -158,14 +186,21 @@ locals {
 }
 
 ################################
-# ---------- Security Group ----------
+# ---------- (Optional) Create SG when reuse_existing_sg = false ----------
 ################################
 
+resource "random_id" "sg" {
+  count       = var.reuse_existing_sg ? 0 : 1
+  byte_length = 2  # 4 hex chars
+}
+
 resource "aws_security_group" "web" {
-  name        = "web-server-sg"
+  count       = var.reuse_existing_sg ? 0 : 1
+  name_prefix = "web-server-sg-"
   description = "Security group for web servers"
   vpc_id      = data.aws_vpc.selected.id
 
+  # HTTP
   ingress {
     description = "HTTP from anywhere"
     from_port   = 80
@@ -174,6 +209,7 @@ resource "aws_security_group" "web" {
     cidr_blocks = ["0.0.0.0/0"]
   }
 
+  # HTTPS
   ingress {
     description = "HTTPS from anywhere"
     from_port   = 443
@@ -182,7 +218,7 @@ resource "aws_security_group" "web" {
     cidr_blocks = ["0.0.0.0/0"]
   }
 
-  # SSH only from Jenkins IP (/32)
+  # SSH from Jenkins only (bare IPv4 + /32)
   ingress {
     description = "SSH from Jenkins"
     from_port   = 22
@@ -191,6 +227,7 @@ resource "aws_security_group" "web" {
     cidr_blocks = ["${var.jenkins_ip}/32"]
   }
 
+  # Outbound: all
   egress {
     description = "Allow all outbound"
     from_port   = 0
@@ -200,10 +237,17 @@ resource "aws_security_group" "web" {
   }
 
   tags = {
-    Name        = "web-server-sg"
+    Name        = "web-server-sg-${try(random_id.sg[0].hex, "new")}"
     Environment = var.environment
     Project     = var.project_name
   }
+}
+
+# Unified SG ID regardless of reuse vs create
+locals {
+  web_sg_id = var.reuse_existing_sg
+    ? data.aws_security_group.existing_web[0].id
+    : aws_security_group.web[0].id
 }
 
 ################################
@@ -269,7 +313,7 @@ resource "aws_instance" "apache" {
   ami                         = var.ami_id
   instance_type               = var.instance_type
   key_name                    = aws_key_pair.deployer.key_name
-  vpc_security_group_ids      = [aws_security_group.web.id]
+  vpc_security_group_ids      = [local.web_sg_id]
   subnet_id                   = local.selected_subnet_id
   associate_public_ip_address = true
 
@@ -332,7 +376,7 @@ resource "aws_instance" "nginx" {
   ami                         = var.ami_id
   instance_type               = var.instance_type
   key_name                    = aws_key_pair.deployer.key_name
-  vpc_security_group_ids      = [aws_security_group.web.id]
+  vpc_security_group_ids      = [local.web_sg_id]
   subnet_id                   = local.selected_subnet_id
   associate_public_ip_address = true
 
@@ -415,7 +459,7 @@ resource "local_file" "ansible_inventory" {
 }
 
 ################################
-# ---------- Deployment Summary (optional nice-to-have) ----------
+# ---------- Deployment Summary (optional) ----------
 ################################
 
 resource "local_file" "deployment_summary" {
