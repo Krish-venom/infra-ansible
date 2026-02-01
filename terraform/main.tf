@@ -1,10 +1,14 @@
 terraform {
   required_version = ">= 1.0"
-  
+
   required_providers {
     aws = {
       source  = "hashicorp/aws"
       version = "~> 5.0"
+    }
+    local = {
+      source  = "hashicorp/local"
+      version = "~> 2.5"
     }
   }
 }
@@ -13,10 +17,14 @@ provider "aws" {
   region = var.aws_region
 }
 
+################################
+# (Optional) Safer AZ selection
+################################
+data "aws_availability_zones" "available" {}
+
 ###################
 # VPC Configuration
 ###################
-
 resource "aws_vpc" "main" {
   cidr_block           = "10.0.0.0/16"
   enable_dns_hostnames = true
@@ -40,7 +48,11 @@ resource "aws_internet_gateway" "main" {
 resource "aws_subnet" "public" {
   vpc_id                  = aws_vpc.main.id
   cidr_block              = "10.0.1.0/24"
-  availability_zone       = "${var.aws_region}a"
+  # Option A: safer (recommended)
+  availability_zone       = data.aws_availability_zones.available.names[0]
+  # Option B: your original (comment out Option A if you prefer this)
+  # availability_zone     = "${var.aws_region}a"
+
   map_public_ip_on_launch = true
 
   tags = {
@@ -69,7 +81,6 @@ resource "aws_route_table_association" "public" {
 ###################
 # Security Groups
 ###################
-
 resource "aws_security_group" "web" {
   name        = "web-server-sg"
   description = "Security group for web servers"
@@ -93,7 +104,7 @@ resource "aws_security_group" "web" {
     cidr_blocks = ["0.0.0.0/0"]
   }
 
-  # SSH from Jenkins server only
+  # SSH from Jenkins server only (jenkins_ip MUST be a bare IP, e.g., 13.201.85.232)
   ingress {
     description = "SSH from Jenkins"
     from_port   = 22
@@ -119,7 +130,6 @@ resource "aws_security_group" "web" {
 ###################
 # SSH Key Pair
 ###################
-
 resource "aws_key_pair" "deployer" {
   key_name   = "webserver-key"
   public_key = file(var.public_key_path)
@@ -132,10 +142,9 @@ resource "aws_key_pair" "deployer" {
 ###################
 # EC2 Instances - Apache Servers
 ###################
-
 resource "aws_instance" "apache" {
   count                  = var.apache_instance_count
-  ami                    = var.ami_id
+  ami                    = var.ami_id               # Make sure this is an Ubuntu AMI if using apt-get
   instance_type          = var.instance_type
   key_name               = aws_key_pair.deployer.key_name
   vpc_security_group_ids = [aws_security_group.web.id]
@@ -144,21 +153,21 @@ resource "aws_instance" "apache" {
   user_data = <<-EOF
               #!/bin/bash
               set -e
-              
+
               # Update system
               apt-get update
               apt-get upgrade -y
-              
+
               # Install Apache
               apt-get install -y apache2
-              
+
               # Install Python for Ansible
               apt-get install -y python3 python3-pip
-              
+
               # Enable and start Apache
               systemctl enable apache2
               systemctl start apache2
-              
+
               # Create a placeholder page
               cat > /var/www/html/index.html <<HTML
               <!DOCTYPE html>
@@ -177,7 +186,7 @@ resource "aws_instance" "apache" {
               </body>
               </html>
 HTML
-              
+
               # Log completion
               echo "Apache setup completed at $(date)" >> /var/log/user-data.log
               EOF
@@ -198,10 +207,9 @@ HTML
 ###################
 # EC2 Instances - Nginx Servers
 ###################
-
 resource "aws_instance" "nginx" {
   count                  = var.nginx_instance_count
-  ami                    = var.ami_id
+  ami                    = var.ami_id               # Make sure this is an Ubuntu AMI if using apt-get
   instance_type          = var.instance_type
   key_name               = aws_key_pair.deployer.key_name
   vpc_security_group_ids = [aws_security_group.web.id]
@@ -210,21 +218,21 @@ resource "aws_instance" "nginx" {
   user_data = <<-EOF
               #!/bin/bash
               set -e
-              
+
               # Update system
               apt-get update
               apt-get upgrade -y
-              
+
               # Install Nginx
               apt-get install -y nginx
-              
+
               # Install Python for Ansible
               apt-get install -y python3 python3-pip
-              
+
               # Enable and start Nginx
               systemctl enable nginx
               systemctl start nginx
-              
+
               # Create a placeholder page
               cat > /var/www/html/index.html <<HTML
               <!DOCTYPE html>
@@ -243,10 +251,10 @@ resource "aws_instance" "nginx" {
               </body>
               </html>
 HTML
-              
+
               # Remove default nginx page
               rm -f /var/www/html/index.nginx-debian.html
-              
+
               # Log completion
               echo "Nginx setup completed at $(date)" >> /var/log/user-data.log
               EOF
@@ -267,7 +275,6 @@ HTML
 ###################
 # Generate Ansible Inventory
 ###################
-
 resource "local_file" "ansible_inventory" {
   content = templatefile("${path.module}/templates/inventory.tftpl", {
     apache_servers = aws_instance.apache[*].public_ip
@@ -281,7 +288,6 @@ resource "local_file" "ansible_inventory" {
 ###################
 # Output Summary File
 ###################
-
 resource "local_file" "deployment_summary" {
   content = <<-EOF
   ========================================
@@ -291,29 +297,30 @@ resource "local_file" "deployment_summary" {
   Region: ${var.aws_region}
   VPC ID: ${aws_vpc.main.id}
   Subnet ID: ${aws_subnet.public.id}
-  
+
   APACHE SERVERS (${var.apache_instance_count}):
   ${join("\n  ", formatlist("- %s (Instance: %s) - Apache", aws_instance.apache[*].public_ip, aws_instance.apache[*].id))}
-  
+
   NGINX SERVERS (${var.nginx_instance_count}):
   ${join("\n  ", formatlist("- %s (Instance: %s) - Nginx", aws_instance.nginx[*].public_ip, aws_instance.nginx[*].id))}
-  
+
   APACHE URLs:
   ${join("\n  ", formatlist("- http://%s", aws_instance.apache[*].public_ip))}
-  
+
   NGINX URLs:
   ${join("\n  ", formatlist("- http://%s", aws_instance.nginx[*].public_ip))}
-  
+
   SSH ACCESS:
   Apache Servers:
   ${join("\n  ", formatlist("ssh -i ~/.ssh/webserver-key ubuntu@%s", aws_instance.apache[*].public_ip))}
-  
+
   Nginx Servers:
   ${join("\n  ", formatlist("ssh -i ~/.ssh/webserver-key ubuntu@%s", aws_instance.nginx[*].public_ip))}
-  
+
   TOTAL SERVERS: ${var.apache_instance_count + var.nginx_instance_count}
   ========================================
   EOF
-  
+
   filename = "${path.module}/deployment-summary.txt"
 }
+``
