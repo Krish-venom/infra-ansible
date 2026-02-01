@@ -30,13 +30,13 @@ provider "aws" {
 }
 
 ################################
-# Reuse an existing VPC by ID
+# Reuse an existing VPC by ID (e.g., default VPC)
 ################################
 data "aws_vpc" "selected" {
   id = var.vpc_id
 }
 
-# All subnets in this VPC; we'll pick the first unless you pass var.subnet_id
+# Get all subnets in that VPC; we’ll pick the first unless you pass var.subnet_id
 data "aws_subnets" "in_vpc" {
   filter {
     name   = "vpc-id"
@@ -57,6 +57,7 @@ resource "aws_security_group" "web" {
   description = "Security group for web servers"
   vpc_id      = data.aws_vpc.selected.id
 
+  # HTTP
   ingress {
     description = "HTTP from anywhere"
     from_port   = 80
@@ -65,6 +66,7 @@ resource "aws_security_group" "web" {
     cidr_blocks = ["0.0.0.0/0"]
   }
 
+  # HTTPS
   ingress {
     description = "HTTPS from anywhere"
     from_port   = 443
@@ -73,7 +75,7 @@ resource "aws_security_group" "web" {
     cidr_blocks = ["0.0.0.0/0"]
   }
 
-  # SSH only from Jenkins IP (/32)
+  # SSH from Jenkins only (bare IPv4 + /32)
   ingress {
     description = "SSH from Jenkins"
     from_port   = 22
@@ -82,6 +84,7 @@ resource "aws_security_group" "web" {
     cidr_blocks = ["${var.jenkins_ip}/32"]
   }
 
+  # Outbound: all
   egress {
     description = "Allow all outbound"
     from_port   = 0
@@ -98,10 +101,10 @@ resource "aws_security_group" "web" {
 }
 
 ###################
-# Generate SSH keypair & avoid duplicates
+# Generate SSH keypair & avoid AWS duplicate errors
 ###################
 resource "random_id" "kp" {
-  byte_length = 2  # 4 hex chars
+  byte_length = 2  # 4 hex chars, e.g., 3f9a
 }
 
 locals {
@@ -151,13 +154,13 @@ resource "local_file" "public_key" {
 # EC2 - Apache
 ###################
 resource "aws_instance" "apache" {
-  count                         = var.apache_instance_count
-  ami                           = var.ami_id
-  instance_type                 = var.instance_type
-  key_name                      = aws_key_pair.deployer.key_name
-  vpc_security_group_ids        = [aws_security_group.web.id]
-  subnet_id                     = local.selected_subnet_id
-  associate_public_ip_address   = true
+  count                       = var.apache_instance_count
+  ami                         = var.ami_id
+  instance_type               = var.instance_type
+  key_name                    = aws_key_pair.deployer.key_name
+  vpc_security_group_ids      = [aws_security_group.web.id]
+  subnet_id                   = local.selected_subnet_id
+  associate_public_ip_address = true
 
   user_data = <<-EOF
               #!/bin/bash
@@ -182,15 +185,15 @@ resource "aws_instance" "apache" {
               <!DOCTYPE html>
               <html>
               <head>
-                  <title>Apache Server ${count.index + 1}</title>
-                  <style>
-                    body { font-family: Arial; text-align:center; padding:50px; background:#f0f0f0; }
-                    h1 { color:#d62828; }
-                  </style>
+                <title>Apache Server ${count.index + 1}</title>
+                <style>
+                  body { font-family: Arial; text-align:center; padding:50px; background:#f0f0f0; }
+                  h1 { color:#d62828; }
+                </style>
               </head>
               <body>
-                  <h1>🔴 Apache Server ${count.index + 1}</h1>
-                  <p>Ready for deployment via Ansible</p>
+                <h1>🔴 Apache Server ${count.index + 1}</h1>
+                <p>Ready for deployment via Ansible</p>
               </body>
               </html>
 HTML
@@ -213,13 +216,13 @@ HTML
 # EC2 - Nginx
 ###################
 resource "aws_instance" "nginx" {
-  count                         = var.nginx_instance_count
-  ami                           = var.ami_id
-  instance_type                 = var.instance_type
-  key_name                      = aws_key_pair.deployer.key_name
-  vpc_security_group_ids        = [aws_security_group.web.id]
-  subnet_id                     = local.selected_subnet_id
-  associate_public_ip_address   = true
+  count                       = var.nginx_instance_count
+  ami                         = var.ami_id
+  instance_type               = var.instance_type
+  key_name                    = aws_key_pair.deployer.key_name
+  vpc_security_group_ids      = [aws_security_group.web.id]
+  subnet_id                   = local.selected_subnet_id
+  associate_public_ip_address = true
 
   user_data = <<-EOF
               #!/bin/bash
@@ -244,15 +247,15 @@ resource "aws_instance" "nginx" {
               <!DOCTYPE html>
               <html>
               <head>
-                  <title>Nginx Server ${count.index + 1}</title>
-                  <style>
-                    body { font-family: Arial; text-align:center; padding:50px; background:#f0f0f0; }
-                    h1 { color:#009688; }
-                  </style>
+                <title>Nginx Server ${count.index + 1}</title>
+                <style>
+                  body { font-family: Arial; text-align:center; padding:50px; background:#f0f0f0; }
+                  h1 { color:#009688; }
+                </style>
               </head>
               <body>
-                  <h1>🔵 Nginx Server ${count.index + 1}</h1>
-                  <p>Ready for deployment via Ansible</p>
+                <h1>🔵 Nginx Server ${count.index + 1}</h1>
+                <p>Ready for deployment via Ansible</p>
               </body>
               </html>
 HTML
@@ -299,7 +302,7 @@ resource "local_file" "ansible_inventory" {
 }
 
 ###################
-# Deployment Summary
+# Deployment Summary (nice to have)
 ###################
 resource "local_file" "deployment_summary" {
   content = <<-EOF
