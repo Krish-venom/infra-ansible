@@ -23,9 +23,9 @@ pipeline {
     // Terraform directory in your repo
     TF_DIR = 'infra-ansible/terraform'
 
-    // These will be overwritten after apply by TF outputs (absolute paths)
+    // Will be overwritten after apply by TF outputs (absolute paths)
     INVENTORY_FILE = 'infra-ansible/ansible-playbooks/inventory/hosts.ini'
-    PRIVATE_KEY    = 'infra-ansible/ansible-playbooks/keys/devops-generated-key-PLACEHOLDER.pem'
+    PRIVATE_KEY    = 'infra-ansible/ansible-playbooks/keys/current.pem'  // stable link used post-normalization
 
     // App checkout destination
     APP_SRC_DIR = 'app-src'
@@ -132,11 +132,12 @@ pipeline {
       }
     }
 
-    stage('Auto-fix inventory & key paths (apply only)') {
+    // Normalize paths: build a stable symlink keys/current.pem and update inventory to use it
+    stage('Normalize inventory & key (apply only)') {
       when { expression { params.WORKFLOW == 'apply' } }
       steps {
         script {
-          env.PRIVATE_KEY = sh(
+          env.ORIG_PRIVATE_KEY = sh(
             script: "terraform -chdir=${TF_DIR} output -raw generated_private_key_path",
             returnStdout: true
           ).trim()
@@ -151,87 +152,53 @@ pipeline {
             returnStdout: true
           ).trim()
 
-          echo "[INFO] TF outputs → key: ${env.PRIVATE_KEY}"
-          echo "[INFO] TF outputs → inventory: ${env.INVENTORY_FILE}"
-          echo "[INFO] TF outputs → keypair: ${env.EFFECTIVE_KEY_NAME}"
+          echo "[INFO] TF → key: ${env.ORIG_PRIVATE_KEY}"
+          echo "[INFO] TF → inventory: ${env.INVENTORY_FILE}"
+          echo "[INFO] TF → keypair: ${env.EFFECTIVE_KEY_NAME}"
         }
 
         sh '''
           set -e
-          echo "[INFO] Auto-fix: checking inventory & key files..."
+          KEY_DIR="$(dirname "${ORIG_PRIVATE_KEY}")"
+          KEY_LINK="${KEY_DIR}/current.pem"
 
-          # --- Normalize INVENTORY_FILE ---
-          if [ ! -f "${INVENTORY_FILE}" ]; then
-            echo "[WARN] Inventory not found at ${INVENTORY_FILE}, attempting auto-fix..."
-            CAND1="${TF_DIR}/../ansible-playbooks/inventory/hosts.ini"
-            CAND2="infra-ansible/ansible-playbooks/inventory/hosts.ini"
-            if [ -f "${CAND1}" ]; then
-              INVENTORY_FILE="$(cd "$(dirname "${CAND1}")" && pwd)/$(basename "${CAND1}")"
-              echo "[INFO] Found inventory at ${INVENTORY_FILE}"
-            elif [ -f "${CAND2}" ]; then
-              INVENTORY_FILE="$(cd "$(dirname "${CAND2}")" && pwd)/$(basename "${CAND2}")"
-              echo "[INFO] Found inventory at ${INVENTORY_FILE}"
-            else
-              echo "[WARN] Could not locate inventory file automatically. Proceeding; Ansible may fail if inventory is wrong."
-            fi
+          if [ -f "${ORIG_PRIVATE_KEY}" ]; then
+            ln -sf "$(basename "${ORIG_PRIVATE_KEY}")" "${KEY_LINK}"
+            chmod 600 "${ORIG_PRIVATE_KEY}" || true
+            chmod 600 "${KEY_LINK}" || true
+            echo "[INFO] Linked ${KEY_LINK} -> ${ORIG_PRIVATE_KEY}"
+            echo "PRIVATE_KEY=${KEY_LINK}" > ${WORKSPACE}/.env_keylink
+          else
+            echo "[WARN] Original key not found at ${ORIG_PRIVATE_KEY}. Will still point to current.pem; Ansible may fail if key is missing."
+            echo "PRIVATE_KEY=${KEY_LINK}" > ${WORKSPACE}/.env_keylink
           fi
 
-          # --- Normalize PRIVATE_KEY ---
-          if [ ! -f "${PRIVATE_KEY}" ]; then
-            echo "[WARN] Private key not found at ${PRIVATE_KEY}, attempting auto-fix..."
-            KEY_BASENAME="${EFFECTIVE_KEY_NAME}.pem"
-            CANDK1="${TF_DIR}/../ansible-playbooks/keys/${KEY_BASENAME}"
-            CANDK2="infra-ansible/ansible-playbooks/keys/${KEY_BASENAME}"
-            CANDK3="ansible-playbooks/keys/${KEY_BASENAME}"
-
-            if [ -f "${CANDK1}" ]; then
-              PRIVATE_KEY="$(cd "$(dirname "${CANDK1}")" && pwd)/$(basename "${CANDK1}")"
-              echo "[INFO] Found key at ${PRIVATE_KEY}"
-            elif [ -f "${CANDK2}" ]; then
-              PRIVATE_KEY="$(cd "$(dirname "${CANDK2}")" && pwd)/$(basename "${CANDK2}")"
-              echo "[INFO] Found key at ${PRIVATE_KEY}"
-            elif [ -f "${CANDK3}" ]; then
-              PRIVATE_KEY="$(cd "$(dirname "${CANDK3}")" && pwd)/$(basename "${CANDK3}")"
-              echo "[INFO] Found key at ${PRIVATE_KEY}"
-            else
-              echo "[WARN] Could not locate private key automatically. Proceeding; Ansible may fail if key is missing."
-            fi
+          # Update inventory to use the stable link ../keys/current.pem
+          if [ -f "${INVENTORY_FILE}" ]; then
+            sed -i 's|ansible_ssh_private_key_file=\\?\\.?/\\?\\.?/\\?keys/[^[:space:]]*|ansible_ssh_private_key_file=../keys/current.pem|g' "${INVENTORY_FILE}" || true
+            echo "[INFO] Updated inventory to use ../keys/current.pem"
+            echo "[INFO] Inventory preview:"
+            sed -n '1,200p' "${INVENTORY_FILE}" || true
+          else
+            echo "[WARN] Inventory not found at ${INVENTORY_FILE}. Continuing; Ansible may fail."
           fi
-
-          # Fix permissions if key exists now
-          if [ -f "${PRIVATE_KEY}" ]; then
-            chmod 600 "${PRIVATE_KEY}" || true
-          fi
-
-          echo "[INFO] Using inventory: ${INVENTORY_FILE}"
-          echo "[INFO] Using private key: ${PRIVATE_KEY}"
-          echo "[INFO] Inventory preview (if present):"
-          sed -n '1,200p' "${INVENTORY_FILE}" 2>/dev/null || true
-
-          {
-            echo "INVENTORY_FILE=${INVENTORY_FILE}"
-            echo "PRIVATE_KEY=${PRIVATE_KEY}"
-          } >> ${WORKSPACE}/.env_autofix
         '''
+
         script {
-          def envFile = "${env.WORKSPACE}/.env_autofix"
+          def envFile = "${env.WORKSPACE}/.env_keylink"
           if (fileExists(envFile)) {
             def content = readFile(envFile).split('\n')
             content.each { line ->
               if (line?.trim()) {
                 def kv = line.split('=', 2)
                 if (kv.size() == 2) {
-                  def k = kv[0].trim()
-                  def v = kv[1].trim()
-                  if (k && v) {
-                    env[k] = v
-                  }
+                  env[(kv[0].trim())] = kv[1].trim()
                 }
               }
             }
           }
-          echo "[INFO] Final INVENTORY_FILE: ${env.INVENTORY_FILE}"
-          echo "[INFO] Final PRIVATE_KEY   : ${env.PRIVATE_KEY}"
+          echo "[INFO] FINAL PRIVATE_KEY (symlink): ${env.PRIVATE_KEY}"
+          echo "[INFO] FINAL INVENTORY_FILE       : ${env.INVENTORY_FILE}"
         }
       }
     }
@@ -276,8 +243,9 @@ pipeline {
       steps {
         sh '''
           set -e
+          # Inventory already includes ansible_user and the normalized key path
           ansible all -i "${INVENTORY_FILE}" -m ping -vv || {
-            echo "[ERROR] Ansible ping failed. Check SSH & SG rules."
+            echo "[ERROR] Ansible ping failed. Check SSH & SG rules (and key/inventory)."
             exit 1
           }
         '''
