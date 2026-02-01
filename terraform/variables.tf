@@ -23,7 +23,7 @@ variable "vpc_id" {
   default     = "vpc-0bb695c41dc9db0a4"
 }
 
-# Optional: specify a particular subnet ID in that VPC; leave empty to auto-pick first
+# Optional: specific subnet in that VPC. Leave empty to auto-pick the first one in the VPC.
 variable "subnet_id" {
   description = "Existing subnet ID in the VPC; if empty, the first subnet in that VPC is used"
   type        = string
