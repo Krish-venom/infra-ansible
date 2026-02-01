@@ -16,7 +16,7 @@ pipeline {
     AWS_DEFAULT_REGION = 'ap-south-1'
 
     // IMPORTANT: bare IP only (no http://, no port, no trailing slash)
-    JENKINS_IP = '3.110.120.129'
+    JENKINS_IP = '15.206.72.51'
 
     // Path where Terraform is located in your repo
     TF_DIR = 'infra-ansible/terraform'
