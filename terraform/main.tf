@@ -18,6 +18,10 @@ terraform {
       source  = "hashicorp/tls"
       version = "~> 4.0"
     }
+    random = {
+      source  = "hashicorp/random"
+      version = "~> 3.5"
+    }
   }
 }
 
@@ -138,19 +142,29 @@ resource "aws_security_group" "web" {
 }
 
 ###################
-# Generate SSH keypair (TLS) & register in AWS
+# Generate SSH keypair & avoid duplicates
 ###################
+# Random suffix so keypair name is unique per workspace
+resource "random_id" "kp" {
+  byte_length = 2 # 4 hex chars
+}
+
+locals {
+  effective_key_name = "${var.keypair_name}-${random_id.kp.hex}"
+}
+
+# Create new key pair
 resource "tls_private_key" "web" {
   algorithm = "RSA"
   rsa_bits  = 4096
 }
 
 resource "aws_key_pair" "deployer" {
-  key_name   = var.keypair_name
+  key_name   = local.effective_key_name
   public_key = tls_private_key.web.public_key_openssh
 
   tags = {
-    Name        = var.keypair_name
+    Name        = local.effective_key_name
     Environment = var.environment
     Project     = var.project_name
     ManagedBy   = "Terraform"
@@ -164,17 +178,17 @@ resource "null_resource" "ensure_dirs" {
   }
 }
 
-# Save generated keys locally for Ansible/SSH
+# Save generated keys locally for Ansible/SSH (gitignore these)
 resource "local_file" "private_key" {
   content         = tls_private_key.web.private_key_pem
-  filename        = "${path.module}/../ansible-playbooks/keys/${var.keypair_name}.pem"
+  filename        = "${path.module}/../ansible-playbooks/keys/${aws_key_pair.deployer.key_name}.pem"
   file_permission = "0600"
   depends_on      = [null_resource.ensure_dirs]
 }
 
 resource "local_file" "public_key" {
   content         = tls_private_key.web.public_key_openssh
-  filename        = "${path.module}/../ansible-playbooks/keys/${var.keypair_name}.pub"
+  filename        = "${path.module}/../ansible-playbooks/keys/${aws_key_pair.deployer.key_name}.pub"
   file_permission = "0644"
   depends_on      = [null_resource.ensure_dirs]
 }
@@ -316,12 +330,12 @@ resource "local_file" "ansible_inventory" {
     "",
     "[apache:vars]",
     "ansible_user=${var.ansible_user}",
-    "ansible_ssh_private_key_file=../keys/${var.keypair_name}.pem",
+    "ansible_ssh_private_key_file=../keys/${aws_key_pair.deployer.key_name}.pem",
     "ansible_python_interpreter=/usr/bin/python3",
     "",
     "[nginx:vars]",
     "ansible_user=${var.ansible_user}",
-    "ansible_ssh_private_key_file=../keys/${var.keypair_name}.pem",
+    "ansible_ssh_private_key_file=../keys/${aws_key_pair.deployer.key_name}.pem",
     "ansible_python_interpreter=/usr/bin/python3",
     ""
   ])
@@ -355,15 +369,34 @@ resource "local_file" "deployment_summary" {
   NGINX  URLs:
   ${join("\n  ", formatlist("- http://%s", aws_instance.nginx[*].public_ip))}
 
-  SSH (Ubuntu default user unless overridden):
+  SSH (default user: ${var.ansible_user}):
   Apache:
-  ${join("\n  ", formatlist("ssh -i ../ansible-playbooks/keys/${var.keypair_name}.pem ${var.ansible_user}@%s", aws_instance.apache[*].public_ip))}
+  ${join("\n  ", formatlist("ssh -i ../ansible-playbooks/keys/${aws_key_pair.deployer.key_name}.pem ${var.ansible_user}@%s", aws_instance.apache[*].public_ip))}
   Nginx:
-  ${join("\n  ", formatlist("ssh -i ../ansible-playbooks/keys/${var.keypair_name}.pem ${var.ansible_user}@%s", aws_instance.nginx[*].public_ip))}
+  ${join("\n  ", formatlist("ssh -i ../ansible-playbooks/keys/${aws_key_pair.deployer.key_name}.pem ${var.ansible_user}@%s", aws_instance.nginx[*].public_ip))}
 
   TOTAL SERVERS: ${var.apache_instance_count + var.nginx_instance_count}
   ========================================
   EOF
 
   filename = "${path.module}/deployment-summary.txt"
+}
+
+###################
+# Outputs (handy for Jenkins)
+###################
+output "effective_keypair_name" {
+  description = "The actual AWS key pair name used (with random suffix)"
+  value       = aws_key_pair.deployer.key_name
+}
+
+output "generated_private_key_path" {
+  description = "Path to the generated private key"
+  value       = local_file.private_key.filename
+  sensitive   = true
+}
+
+output "inventory_path" {
+  description = "Path to the generated Ansible inventory"
+  value       = local_file.ansible_inventory.filename
 }
