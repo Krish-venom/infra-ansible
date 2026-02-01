@@ -26,12 +26,12 @@ provider "aws" {
 }
 
 ################################
-# Safer AZ selection
+# Availability Zones
 ################################
 data "aws_availability_zones" "available" {}
 
 ###################
-# VPC + Networking
+# VPC & Networking
 ###################
 resource "aws_vpc" "main" {
   cidr_block           = "10.0.0.0/16"
@@ -113,7 +113,7 @@ resource "aws_security_group" "web" {
     cidr_blocks = ["0.0.0.0/0"]
   }
 
-  # SSH from Jenkins public IP only (bare IPv4 expected)
+  # SSH only from Jenkins public IP (bare IPv4)
   ingress {
     description = "SSH from Jenkins"
     from_port   = 22
@@ -138,17 +138,15 @@ resource "aws_security_group" "web" {
 }
 
 ###################
-# Generate SSH Keypair (TLS) and register in AWS
+# Generate SSH keypair (TLS) & register in AWS
 ###################
-# 1) Create a brand-new private key
 resource "tls_private_key" "web" {
   algorithm = "RSA"
   rsa_bits  = 4096
 }
 
-# 2) Register public key with AWS as an EC2 key pair
 resource "aws_key_pair" "deployer" {
-  key_name   = var.keypair_name    # e.g., "devops-generated-key"
+  key_name   = var.keypair_name
   public_key = tls_private_key.web.public_key_openssh
 
   tags = {
@@ -159,41 +157,39 @@ resource "aws_key_pair" "deployer" {
   }
 }
 
-# 3) Ensure output directory exists (to write keys/files)
+# Ensure local dirs for inventory & keys exist
 resource "null_resource" "ensure_dirs" {
   provisioner "local-exec" {
     command = "mkdir -p ${path.module}/../ansible-playbooks/inventory ${path.module}/../ansible-playbooks/keys"
   }
 }
 
-# 4) Save the generated keys to disk (so you can SSH / use Ansible)
+# Save generated keys locally for Ansible/SSH
 resource "local_file" "private_key" {
   content         = tls_private_key.web.private_key_pem
   filename        = "${path.module}/../ansible-playbooks/keys/${var.keypair_name}.pem"
   file_permission = "0600"
-
-  depends_on = [null_resource.ensure_dirs]
+  depends_on      = [null_resource.ensure_dirs]
 }
 
 resource "local_file" "public_key" {
   content         = tls_private_key.web.public_key_openssh
   filename        = "${path.module}/../ansible-playbooks/keys/${var.keypair_name}.pub"
   file_permission = "0644"
-
-  depends_on = [null_resource.ensure_dirs]
+  depends_on      = [null_resource.ensure_dirs]
 }
 
 ###################
 # EC2 - Apache
 ###################
 resource "aws_instance" "apache" {
-  count                  = var.apache_instance_count
-  ami                    = var.ami_id
-  instance_type          = var.instance_type
-  key_name               = aws_key_pair.deployer.key_name
-  vpc_security_group_ids = [aws_security_group.web.id]
-  subnet_id              = aws_subnet.public.id
-  associate_public_ip_address = true
+  count                         = var.apache_instance_count
+  ami                           = var.ami_id
+  instance_type                 = var.instance_type
+  key_name                      = aws_key_pair.deployer.key_name
+  vpc_security_group_ids        = [aws_security_group.web.id]
+  subnet_id                     = aws_subnet.public.id
+  associate_public_ip_address   = true
 
   user_data = <<-EOF
               #!/bin/bash
@@ -220,14 +216,13 @@ resource "aws_instance" "apache" {
               <head>
                   <title>Apache Server ${count.index + 1}</title>
                   <style>
-                      body { font-family: Arial; text-align: center; padding: 50px; background: #f0f0f0; }
-                      h1 { color: #d62828; }
+                    body { font-family: Arial; text-align:center; padding:50px; background:#f0f0f0; }
+                    h1 { color:#d62828; }
                   </style>
               </head>
               <body>
                   <h1>🔴 Apache Server ${count.index + 1}</h1>
                   <p>Ready for deployment via Ansible</p>
-                  <p>Powered by Apache HTTP Server</p>
               </body>
               </html>
 HTML
@@ -243,22 +238,20 @@ HTML
     ManagedBy   = "Terraform"
   }
 
-  lifecycle {
-    create_before_destroy = true
-  }
+  lifecycle { create_before_destroy = true }
 }
 
 ###################
 # EC2 - Nginx
 ###################
 resource "aws_instance" "nginx" {
-  count                  = var.nginx_instance_count
-  ami                    = var.ami_id
-  instance_type          = var.instance_type
-  key_name               = aws_key_pair.deployer.key_name
-  vpc_security_group_ids = [aws_security_group.web.id]
-  subnet_id              = aws_subnet.public.id
-  associate_public_ip_address = true
+  count                         = var.nginx_instance_count
+  ami                           = var.ami_id
+  instance_type                 = var.instance_type
+  key_name                      = aws_key_pair.deployer.key_name
+  vpc_security_group_ids        = [aws_security_group.web.id]
+  subnet_id                     = aws_subnet.public.id
+  associate_public_ip_address   = true
 
   user_data = <<-EOF
               #!/bin/bash
@@ -285,14 +278,13 @@ resource "aws_instance" "nginx" {
               <head>
                   <title>Nginx Server ${count.index + 1}</title>
                   <style>
-                      body { font-family: Arial; text-align: center; padding: 50px; background: #f0f0f0; }
-                      h1 { color: #009688; }
+                    body { font-family: Arial; text-align:center; padding:50px; background:#f0f0f0; }
+                    h1 { color:#009688; }
                   </style>
               </head>
               <body>
                   <h1>🔵 Nginx Server ${count.index + 1}</h1>
                   <p>Ready for deployment via Ansible</p>
-                  <p>Powered by Nginx Web Server</p>
               </body>
               </html>
 HTML
@@ -308,21 +300,33 @@ HTML
     ManagedBy   = "Terraform"
   }
 
-  lifecycle {
-    create_before_destroy = true
-  }
+  lifecycle { create_before_destroy = true }
 }
 
 ###################
-# Ansible Inventory
+# Ansible Inventory (dynamic; no hardcoding)
 ###################
 resource "local_file" "ansible_inventory" {
-  content = templatefile("${path.module}/templates/inventory.tftpl", {
-    apache_servers = aws_instance.apache[*].public_ip
-    nginx_servers  = aws_instance.nginx[*].public_ip
-  })
-  filename = "${path.module}/../ansible-playbooks/inventory/hosts.ini"
+  content = join("\n", [
+    "[apache]",
+    length(aws_instance.apache) > 0 ? join("\n", aws_instance.apache[*].public_ip) : "",
+    "",
+    "[nginx]",
+    length(aws_instance.nginx) > 0 ? join("\n", aws_instance.nginx[*].public_ip) : "",
+    "",
+    "[apache:vars]",
+    "ansible_user=${var.ansible_user}",
+    "ansible_ssh_private_key_file=../keys/${var.keypair_name}.pem",
+    "ansible_python_interpreter=/usr/bin/python3",
+    "",
+    "[nginx:vars]",
+    "ansible_user=${var.ansible_user}",
+    "ansible_ssh_private_key_file=../keys/${var.keypair_name}.pem",
+    "ansible_python_interpreter=/usr/bin/python3",
+    ""
+  ])
 
+  filename   = "${path.module}/../ansible-playbooks/inventory/hosts.ini"
   depends_on = [null_resource.ensure_dirs, aws_instance.apache, aws_instance.nginx]
 }
 
@@ -348,14 +352,14 @@ resource "local_file" "deployment_summary" {
   APACHE URLs:
   ${join("\n  ", formatlist("- http://%s", aws_instance.apache[*].public_ip))}
 
-  NGINX URLs:
+  NGINX  URLs:
   ${join("\n  ", formatlist("- http://%s", aws_instance.nginx[*].public_ip))}
 
-  SSH ACCESS (Ubuntu default user):
+  SSH (Ubuntu default user unless overridden):
   Apache:
-  ${join("\n  ", formatlist("ssh -i ../ansible-playbooks/keys/${var.keypair_name}.pem ubuntu@%s", aws_instance.apache[*].public_ip))}
+  ${join("\n  ", formatlist("ssh -i ../ansible-playbooks/keys/${var.keypair_name}.pem ${var.ansible_user}@%s", aws_instance.apache[*].public_ip))}
   Nginx:
-  ${join("\n  ", formatlist("ssh -i ../ansible-playbooks/keys/${var.keypair_name}.pem ubuntu@%s", aws_instance.nginx[*].public_ip))}
+  ${join("\n  ", formatlist("ssh -i ../ansible-playbooks/keys/${var.keypair_name}.pem ${var.ansible_user}@%s", aws_instance.nginx[*].public_ip))}
 
   TOTAL SERVERS: ${var.apache_instance_count + var.nginx_instance_count}
   ========================================
@@ -363,3 +367,4 @@ resource "local_file" "deployment_summary" {
 
   filename = "${path.module}/deployment-summary.txt"
 }
+``
