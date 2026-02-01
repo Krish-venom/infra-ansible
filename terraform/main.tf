@@ -25,18 +25,122 @@ terraform {
   }
 }
 
+################################
+# ---------- Variables ----------
+################################
+
+variable "aws_region" {
+  description = "AWS region for deployment"
+  type        = string
+  default     = "ap-south-1"
+}
+
+variable "environment" {
+  description = "Environment tag"
+  type        = string
+  default     = "production"
+}
+
+variable "project_name" {
+  description = "Project tag"
+  type        = string
+  default     = "devops-webapp"
+}
+
+# 👉 Existing VPC ID to use (your default VPC)
+variable "vpc_id" {
+  description = "Existing VPC ID to deploy into"
+  type        = string
+  default     = "vpc-0bb695c41dc9db0a4"
+}
+
+# Optional: specific subnet ID in that VPC; leave empty to auto-pick the first subnet in the VPC
+variable "subnet_id" {
+  description = "Existing subnet ID in the VPC; if empty, the first subnet in that VPC is used"
+  type        = string
+  default     = ""
+}
+
+# Base key pair name; a random suffix is added to avoid duplicates
+variable "keypair_name" {
+  description = "Base name for the generated AWS key pair and local key files"
+  type        = string
+  default     = "devops-generated-key"
+}
+
+variable "ansible_user" {
+  description = "Remote SSH user for Ansible (ubuntu for Ubuntu; ec2-user for Amazon Linux)"
+  type        = string
+  default     = "ubuntu"
+}
+
+variable "apache_instance_count" {
+  description = "Number of Apache servers"
+  type        = number
+  default     = 2
+
+  validation {
+    condition     = var.apache_instance_count > 0 && var.apache_instance_count <= 10
+    error_message = "Apache count must be between 1 and 10."
+  }
+}
+
+variable "nginx_instance_count" {
+  description = "Number of Nginx servers"
+  type        = number
+  default     = 2
+
+  validation {
+    condition     = var.nginx_instance_count > 0 && var.nginx_instance_count <= 10
+    error_message = "Nginx count must be between 1 and 10."
+  }
+}
+
+variable "instance_type" {
+  description = "EC2 instance type"
+  type        = string
+  default     = "t3.micro"
+}
+
+variable "ami_id" {
+  description = "AMI ID (Ubuntu recommended if using apt-get in user_data)"
+  type        = string
+  default     = "ami-019715e0d74f695be"  # Ensure this exists in your region
+
+  validation {
+    condition     = length(var.ami_id) > 0 && can(regex("^ami-[0-9a-fA-F]{8,}$", var.ami_id))
+    error_message = "Provide a valid AMI ID (ami-xxxxxxxx) available in your region."
+  }
+}
+
+variable "jenkins_ip" {
+  description = "Public IPv4 of Jenkins (bare IP, no scheme/port), e.g., 3.110.120.129"
+  type        = string
+
+  validation {
+    condition     = can(regex("^\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}$", var.jenkins_ip))
+    error_message = "jenkins_ip must be a bare IPv4 like 3.110.120.129 (no http:// or port)."
+  }
+}
+
+################################
+# ---------- Provider ----------
+################################
+
 provider "aws" {
   region = var.aws_region
 }
 
 ################################
-# Reuse an existing VPC by ID (e.g., default VPC)
+# ---------- Data Sources ----------
 ################################
+
+# Reuse existing VPC by ID
 data "aws_vpc" "selected" {
   id = var.vpc_id
 }
 
-# Get all subnets in that VPC; we’ll pick the first unless you pass var.subnet_id
+# Get all subnets in that VPC; we'll pick the first unless you pass var.subnet_id
 data "aws_subnets" "in_vpc" {
   filter {
     name   = "vpc-id"
@@ -44,20 +148,24 @@ data "aws_subnets" "in_vpc" {
   }
 }
 
+################################
+# ---------- Locals ----------
+################################
+
 locals {
   # Prefer a specific subnet if provided, else pick the first found in the VPC
   selected_subnet_id = var.subnet_id != "" ? var.subnet_id : data.aws_subnets.in_vpc.ids[0]
 }
 
-###################
-# Security Group (in the selected VPC)
-###################
+################################
+# ---------- Security Group ----------
+################################
+
 resource "aws_security_group" "web" {
   name        = "web-server-sg"
   description = "Security group for web servers"
   vpc_id      = data.aws_vpc.selected.id
 
-  # HTTP
   ingress {
     description = "HTTP from anywhere"
     from_port   = 80
@@ -66,7 +174,6 @@ resource "aws_security_group" "web" {
     cidr_blocks = ["0.0.0.0/0"]
   }
 
-  # HTTPS
   ingress {
     description = "HTTPS from anywhere"
     from_port   = 443
@@ -75,7 +182,7 @@ resource "aws_security_group" "web" {
     cidr_blocks = ["0.0.0.0/0"]
   }
 
-  # SSH from Jenkins only (bare IPv4 + /32)
+  # SSH only from Jenkins IP (/32)
   ingress {
     description = "SSH from Jenkins"
     from_port   = 22
@@ -84,7 +191,6 @@ resource "aws_security_group" "web" {
     cidr_blocks = ["${var.jenkins_ip}/32"]
   }
 
-  # Outbound: all
   egress {
     description = "Allow all outbound"
     from_port   = 0
@@ -100,22 +206,26 @@ resource "aws_security_group" "web" {
   }
 }
 
-###################
-# Generate SSH keypair & avoid AWS duplicate errors
-###################
+################################
+# ---------- Key Pair Generation ----------
+################################
+
+# Random suffix to avoid AWS duplicate key errors
 resource "random_id" "kp" {
-  byte_length = 2  # 4 hex chars, e.g., 3f9a
+  byte_length = 2  # 4 hex chars, e.g., f039
 }
 
 locals {
   effective_key_name = "${var.keypair_name}-${random_id.kp.hex}"
 }
 
+# Generate new private/public key
 resource "tls_private_key" "web" {
   algorithm = "RSA"
   rsa_bits  = 4096
 }
 
+# Register public key in AWS
 resource "aws_key_pair" "deployer" {
   key_name   = local.effective_key_name
   public_key = tls_private_key.web.public_key_openssh
@@ -150,9 +260,10 @@ resource "local_file" "public_key" {
   depends_on      = [null_resource.ensure_dirs]
 }
 
-###################
-# EC2 - Apache
-###################
+################################
+# ---------- EC2 - Apache ----------
+################################
+
 resource "aws_instance" "apache" {
   count                       = var.apache_instance_count
   ami                         = var.ami_id
@@ -212,9 +323,10 @@ HTML
   lifecycle { create_before_destroy = true }
 }
 
-###################
-# EC2 - Nginx
-###################
+################################
+# ---------- EC2 - Nginx ----------
+################################
+
 resource "aws_instance" "nginx" {
   count                       = var.nginx_instance_count
   ami                         = var.ami_id
@@ -274,9 +386,10 @@ HTML
   lifecycle { create_before_destroy = true }
 }
 
-###################
-# Ansible Inventory (dynamic; no hardcoding)
-###################
+################################
+# ---------- Dynamic Ansible Inventory ----------
+################################
+
 resource "local_file" "ansible_inventory" {
   content = join("\n", [
     "[apache]",
@@ -301,9 +414,10 @@ resource "local_file" "ansible_inventory" {
   depends_on = [null_resource.ensure_dirs, aws_instance.apache, aws_instance.nginx]
 }
 
-###################
-# Deployment Summary (nice to have)
-###################
+################################
+# ---------- Deployment Summary (optional nice-to-have) ----------
+################################
+
 resource "local_file" "deployment_summary" {
   content = <<-EOF
   ========================================
@@ -338,9 +452,10 @@ resource "local_file" "deployment_summary" {
   filename = "${path.module}/deployment-summary.txt"
 }
 
-###################
-# Outputs (absolute paths for Jenkins)
-###################
+################################
+# ---------- Outputs (absolute paths for Jenkins) ----------
+################################
+
 output "effective_keypair_name" {
   description = "The actual AWS key pair name used (with random suffix)"
   value       = aws_key_pair.deployer.key_name
