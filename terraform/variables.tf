@@ -16,7 +16,7 @@ variable "project_name" {
   default     = "devops-webapp"
 }
 
-# Base key pair name; a random suffix is appended to avoid duplicates
+# Base key pair name; random suffix added to avoid duplicates
 variable "keypair_name" {
   description = "Base name for the generated AWS key pair and local key files"
   type        = string
@@ -60,7 +60,7 @@ variable "instance_type" {
 variable "ami_id" {
   description = "AMI ID (Ubuntu recommended if using apt-get in user_data)"
   type        = string
-  default     = "ami-019715e0d74f695be"  # Ensure this exists in your chosen region
+  default     = "ami-019715e0d74f695be"  # Ensure this exists in your region
 
   validation {
     condition     = length(var.ami_id) > 0 && can(regex("^ami-[0-9a-fA-F]{8,}$", var.ami_id))
