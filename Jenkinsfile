@@ -22,8 +22,9 @@ pipeline {
     // Terraform directory
     TF_DIR = 'infra-ansible/terraform'
 
-    // Inventory (Terraform will write this file)
+    // Placeholder; will be overwritten by TF outputs (absolute paths)
     INVENTORY_FILE = 'infra-ansible/ansible-playbooks/inventory/hosts.ini'
+    PRIVATE_KEY    = 'infra-ansible/ansible-playbooks/keys/devops-generated-key-XXXX.pem'
 
     // App checkout destination
     APP_SRC_DIR = 'app-src'
@@ -126,24 +127,23 @@ pipeline {
       }
     }
 
-    // --------- Fetch dynamic outputs from Terraform (apply only) ---------
+    // --------- Fetch absolute paths from Terraform outputs (apply only) ---------
     stage('Fetch TF outputs (apply only)') {
       when { expression { params.WORKFLOW == 'apply' } }
       steps {
         script {
-          // Fetch effective key path and inventory path from TF outputs
           env.PRIVATE_KEY = sh(
             script: "terraform -chdir=${TF_DIR} output -raw generated_private_key_path",
             returnStdout: true
           ).trim()
 
-          env.EFFECTIVE_KEY_NAME = sh(
-            script: "terraform -chdir=${TF_DIR} output -raw effective_keypair_name",
+          env.INVENTORY_FILE = sh(
+            script: "terraform -chdir=${TF_DIR} output -raw inventory_path",
             returnStdout: true
           ).trim()
 
-          env.INVENTORY_FILE = sh(
-            script: "terraform -chdir=${TF_DIR} output -raw inventory_path",
+          env.EFFECTIVE_KEY_NAME = sh(
+            script: "terraform -chdir=${TF_DIR} output -raw effective_keypair_name",
             returnStdout: true
           ).trim()
 
@@ -210,7 +210,7 @@ pipeline {
       steps {
         sh '''
           set -e
-          # Inventory carries ansible_user + key path; no need to pass -u / --private-key
+          # Inventory already carries ansible_user + key path
           ansible all -i "${INVENTORY_FILE}" -m ping -vv || {
             echo "[ERROR] Ansible ping failed. Check SSH & SG rules."
             exit 1
@@ -224,12 +224,11 @@ pipeline {
       steps {
         sh '''
           set -e
-          # Package app into tarball
           TAR="app.tgz"
           rm -f "$TAR"
           tar -C "${APP_SRC_DIR}" -czf "$TAR" .
 
-          # Push to Apache group (Debian/Ubuntu root, fallback to RHEL path)
+          # Push to Apache servers (Debian/Ubuntu default; fallback for RHEL paths)
           ansible apache -i "${INVENTORY_FILE}" -m unarchive \
             -a "src=${WORKSPACE}/$TAR dest=/var/www/html/ remote_src=no owner=www-data group=www-data mode=0644" -vv || \
           ansible apache -i "${INVENTORY_FILE}" -m unarchive \
@@ -239,7 +238,7 @@ pipeline {
           ansible apache -i "${INVENTORY_FILE}" -m service -a "name=apache2 state=restarted" || \
           ansible apache -i "${INVENTORY_FILE}" -m service -a "name=httpd state=restarted" || true
 
-          # Push to Nginx group (try both common roots)
+          # Push to Nginx servers (try common roots)
           ansible nginx -i "${INVENTORY_FILE}" -m unarchive \
             -a "src=${WORKSPACE}/$TAR dest=/usr/share/nginx/html/ remote_src=no owner=nginx group=nginx mode=0644" -vv || \
           ansible nginx -i "${INVENTORY_FILE}" -m unarchive \
