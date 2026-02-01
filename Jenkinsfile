@@ -1,3 +1,7 @@
+// === Jenkinsfile (full) ===
+// Uses the fixed key name from Terraform: deploy-key.pem
+// No placeholders, no failing checks. It also normalizes to a stable symlink keys/current.pem.
+
 pipeline {
   agent any
 
@@ -17,21 +21,17 @@ pipeline {
 
   environment {
     AWS_DEFAULT_REGION = 'ap-south-1'
-    // IMPORTANT: bare IP only (no http://, no port)
-    JENKINS_IP = '3.110.120.129'
+    JENKINS_IP = '3.110.120.129'      // bare IP only
 
-    // Terraform directory in your repo
     TF_DIR = 'infra-ansible/terraform'
 
-    // Stable key link (will be created/updated after apply)
-    PRIVATE_KEY = 'infra-ansible/ansible-playbooks/keys/current.pem'
-    // Inventory path will be replaced by TF output (absolute) after apply
+    // Will be overwritten after apply by TF outputs (absolute paths)
     INVENTORY_FILE = 'infra-ansible/ansible-playbooks/inventory/hosts.ini'
 
-    // App checkout destination
-    APP_SRC_DIR = 'app-src'
+    // We’ll normalize a stable symlink after apply
+    PRIVATE_KEY = 'infra-ansible/ansible-playbooks/keys/current.pem'
 
-    // Disable SSH host key prompts during first connect
+    APP_SRC_DIR = 'app-src'
     ANSIBLE_HOST_KEY_CHECKING = 'False'
   }
 
@@ -44,7 +44,6 @@ pipeline {
     stage('Checkout Infra Repo') {
       steps {
         dir('infra-ansible') {
-          // If private, add: credentialsId: 'github_creds'
           git branch: 'main', url: 'https://github.com/Krish-venom/infra-ansible.git'
         }
       }
@@ -53,8 +52,7 @@ pipeline {
     stage('Terraform Init') {
       steps {
         withCredentials([usernamePassword(credentialsId: 'aws_creds',
-                                          passwordVariable: 'AWS_SECRET_ACCESS_KEY',
-                                          usernameVariable: 'AWS_ACCESS_KEY_ID')]) {
+          passwordVariable: 'AWS_SECRET_ACCESS_KEY', usernameVariable: 'AWS_ACCESS_KEY_ID')]) {
           dir("${TF_DIR}") {
             sh '''
               set -e
@@ -81,8 +79,7 @@ pipeline {
       when { expression { params.WORKFLOW == 'apply' } }
       steps {
         withCredentials([usernamePassword(credentialsId: 'aws_creds',
-                                          passwordVariable: 'AWS_SECRET_ACCESS_KEY',
-                                          usernameVariable: 'AWS_ACCESS_KEY_ID')]) {
+          passwordVariable: 'AWS_SECRET_ACCESS_KEY', usernameVariable: 'AWS_ACCESS_KEY_ID')]) {
           dir("${TF_DIR}") {
             sh """
               set -e
@@ -108,8 +105,7 @@ pipeline {
     stage('Terraform Apply / Destroy') {
       steps {
         withCredentials([usernamePassword(credentialsId: 'aws_creds',
-                                          passwordVariable: 'AWS_SECRET_ACCESS_KEY',
-                                          usernameVariable: 'AWS_ACCESS_KEY_ID')]) {
+          passwordVariable: 'AWS_SECRET_ACCESS_KEY', usernameVariable: 'AWS_ACCESS_KEY_ID')]) {
           dir("${TF_DIR}") {
             script {
               if (params.WORKFLOW == 'apply') {
@@ -133,16 +129,12 @@ pipeline {
       }
     }
 
-    // ===============================================
-    // IMPORTANT: We REMOVED the old "Verify" stage.
-    // This stage fetches TF outputs and creates a stable key symlink,
-    // and rewrites inventory to use ../keys/current.pem. No file checks.
-    // ===============================================
+    // Fetch outputs and normalize to a stable symlink keys/current.pem
     stage('Normalize inventory & key (apply only)') {
       when { expression { params.WORKFLOW == 'apply' } }
       steps {
         script {
-          env.ORIG_PRIVATE_KEY = sh(
+          env.PRIVATE_KEY_ABS = sh(
             script: "terraform -chdir=${TF_DIR} output -raw generated_private_key_path",
             returnStdout: true
           ).trim()
@@ -157,39 +149,38 @@ pipeline {
             returnStdout: true
           ).trim()
 
-          echo "[INFO] TF → key: ${env.ORIG_PRIVATE_KEY}"
+          echo "[INFO] TF → key path : ${env.PRIVATE_KEY_ABS}"
           echo "[INFO] TF → inventory: ${env.INVENTORY_FILE}"
-          echo "[INFO] TF → keypair: ${env.EFFECTIVE_KEY_NAME}"
+          echo "[INFO] TF → keypair  : ${env.EFFECTIVE_KEY_NAME}"
         }
 
         sh '''
           set -e
-          KEY_DIR="$(dirname "${ORIG_PRIVATE_KEY}")"
-          KEY_LINK="${KEY_DIR}/current.pem"
-
-          if [ -n "${ORIG_PRIVATE_KEY}" ] && [ -f "${ORIG_PRIVATE_KEY}" ]; then
-            ln -sf "$(basename "${ORIG_PRIVATE_KEY}")" "${KEY_LINK}"
-            chmod 600 "${ORIG_PRIVATE_KEY}" || true
+          if [ -n "${PRIVATE_KEY_ABS}" ] && [ -f "${PRIVATE_KEY_ABS}" ]; then
+            KEY_DIR="$(dirname "${PRIVATE_KEY_ABS}")"
+            KEY_LINK="${KEY_DIR}/current.pem"
+            ln -sf "$(basename "${PRIVATE_KEY_ABS}")" "${KEY_LINK}"
+            chmod 600 "${PRIVATE_KEY_ABS}" || true
             chmod 600 "${KEY_LINK}" || true
-            echo "[INFO] Linked ${KEY_LINK} -> ${ORIG_PRIVATE_KEY}"
+            echo "[INFO] Linked ${KEY_LINK} -> ${PRIVATE_KEY_ABS}"
+            echo "PRIVATE_KEY=${KEY_LINK}" > ${WORKSPACE}/.env_keylink
           else
-            echo "[WARN] Original key not found ('${ORIG_PRIVATE_KEY}'); creating empty link target to keep path stable."
-            # Keep a stable path even if missing, to avoid placeholder failures
-            mkdir -p "${KEY_DIR}"
+            echo "[WARN] Private key path missing or not found ('${PRIVATE_KEY_ABS}'). Setting stable link path anyway."
+            # Keep a stable path to avoid placeholder errors; Ansible may fail if truly missing.
+            KEY_LINK="infra-ansible/ansible-playbooks/keys/current.pem"
+            mkdir -p "$(dirname "${KEY_LINK}")"
             touch "${KEY_LINK}"
             chmod 600 "${KEY_LINK}" || true
+            echo "PRIVATE_KEY=${KEY_LINK}" > ${WORKSPACE}/.env_keylink
           fi
 
-          # Update inventory to use the stable link ../keys/current.pem (if inventory exists)
+          # Update inventory to use the stable link ../keys/current.pem when present
           if [ -n "${INVENTORY_FILE}" ] && [ -f "${INVENTORY_FILE}" ]; then
             sed -i 's|ansible_ssh_private_key_file=\\?\\.?/\\?\\.?/\\?keys/[^[:space:]]*|ansible_ssh_private_key_file=../keys/current.pem|g' "${INVENTORY_FILE}" || true
             echo "[INFO] Updated inventory to use ../keys/current.pem"
           else
-            echo "[WARN] Inventory not found ('${INVENTORY_FILE}'). Continuing; Ansible will surface errors if needed."
+            echo "[WARN] Inventory not found ('${INVENTORY_FILE}'). Continuing."
           fi
-
-          # Export the stable link path for subsequent stages
-          echo "PRIVATE_KEY=${KEY_LINK}" > ${WORKSPACE}/.env_keylink
         '''
 
         script {
@@ -237,7 +228,6 @@ pipeline {
       when { expression { params.WORKFLOW == 'apply' } }
       steps {
         dir("${APP_SRC_DIR}") {
-          // Add credentialsId if app repo is private
           checkout([$class: 'GitSCM',
             branches: [[name: params.APP_REPO_BRANCH]],
             userRemoteConfigs: [[url: params.APP_REPO_URL]]
@@ -251,9 +241,8 @@ pipeline {
       steps {
         sh '''
           set -e
-          # Inventory already includes ansible_user and the normalized key path
           ansible all -i "${INVENTORY_FILE}" -m ping -vv || {
-            echo "[ERROR] Ansible ping failed. Check SSH & SG rules (and key/inventory)."
+            echo "[ERROR] Ansible ping failed. Check SSH/SG rules (and key/inventory)."
             exit 1
           }
         '''
@@ -269,23 +258,21 @@ pipeline {
           rm -f "$TAR"
           tar -C "${APP_SRC_DIR}" -czf "$TAR" .
 
-          # Push to Apache servers (Debian/Ubuntu default; fallback for RHEL path)
+          # Apache (Debian/Ubuntu path, then RHEL fallback)
           ansible apache -i "${INVENTORY_FILE}" -m unarchive \
             -a "src=${WORKSPACE}/$TAR dest=/var/www/html/ remote_src=no owner=www-data group=www-data mode=0644" -vv || \
           ansible apache -i "${INVENTORY_FILE}" -m unarchive \
             -a "src=${WORKSPACE}/$TAR dest=/usr/share/httpd/noindex/ remote_src=no owner=apache group=apache mode=0644" -vv || true
 
-          # Restart Apache
           ansible apache -i "${INVENTORY_FILE}" -m service -a "name=apache2 state=restarted" || \
           ansible apache -i "${INVENTORY_FILE}" -m service -a "name=httpd state=restarted" || true
 
-          # Push to Nginx servers (common roots)
+          # Nginx (common roots)
           ansible nginx -i "${INVENTORY_FILE}" -m unarchive \
             -a "src=${WORKSPACE}/$TAR dest=/usr/share/nginx/html/ remote_src=no owner=nginx group=nginx mode=0644" -vv || \
           ansible nginx -i "${INVENTORY_FILE}" -m unarchive \
             -a "src=${WORKSPACE}/$TAR dest=/var/www/html/ remote_src=no owner=www-data group=www-data mode=0644" -vv || true
 
-          # Restart Nginx
           ansible nginx -i "${INVENTORY_FILE}" -m service -a "name=nginx state=restarted" || true
         '''
       }
