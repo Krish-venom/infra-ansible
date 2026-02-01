@@ -3,44 +3,51 @@ pipeline {
 
   options {
     timestamps()
-    timeout(time: 20, unit: 'MINUTES')
-    buildDiscarder(logRotator(numToKeepStr: '5'))
+    timeout(time: 25, unit: 'MINUTES')
+    buildDiscarder(logRotator(numToKeepStr: '10'))
   }
 
   parameters {
-    choice(name: 'WORKFLOW', choices: ['apply', 'destroy'], description: 'Select terraform workflow')
+    choice(name: 'WORKFLOW', choices: ['apply', 'destroy'], description: 'Select Terraform workflow')
   }
 
   environment {
+    // Region must match your Terraform default or tfvars
     AWS_DEFAULT_REGION = 'ap-south-1'
-    // No trailing slash to avoid var parsing issues in TF
-    JENKINS_IP        = 'http://13.201.97.210:8080/'
-    TF_DIR            = 'infra-ansible/terraform'
+
+    // IMPORTANT: bare IP only (no http://, no port, no trailing slash)
+    JENKINS_IP = '3.110.120.129'
+
+    // Path where Terraform is located in your repo
+    TF_DIR = 'infra-ansible/terraform'
   }
 
   stages {
 
     stage('Cleanup Workspace') {
-      steps { cleanWs() }
+      steps {
+        cleanWs()
+      }
     }
 
     stage('Checkout Infra Repo') {
       steps {
         dir('infra-ansible') {
-          // Remove credentialsId if the repo is public
-          git branch: 'main',
-              url: 'https://github.com/Krish-venom/infra-ansible.git'
+          // Add credentialsId if your repo is private, e.g., credentialsId: 'github_creds'
+          git branch: 'main', url: 'https://github.com/Krish-venom/infra-ansible.git'
         }
       }
     }
 
-    stage('Terraform Version & Files') {
+    stage('Terraform Version & Layout Check') {
       steps {
         sh '''
-          terraform version || { echo "Terraform not installed on this agent"; exit 1; }
-          echo "---- Repo root ----"
+          set -e
+          echo "Terraform version:"
+          terraform version
+          echo "---- Root contents ----"
           ls -la
-          echo "---- Terraform dir ----"
+          echo "---- TF_DIR contents ----"
           ls -la "${TF_DIR}" || true
         '''
       }
@@ -52,7 +59,7 @@ pipeline {
           dir("${TF_DIR}") {
             sh '''
               set -e
-              echo "Running terraform init in $(pwd)"
+              echo "Initializing Terraform in $(pwd)"
               terraform init -input=false
             '''
           }
@@ -60,7 +67,7 @@ pipeline {
       }
     }
 
-    stage('Terraform Validate (optional but recommended)') {
+    stage('Terraform Validate & Fmt') {
       steps {
         dir("${TF_DIR}") {
           sh '''
@@ -77,6 +84,8 @@ pipeline {
       steps {
         withCredentials([usernamePassword(credentialsId: 'aws_creds', passwordVariable: 'AWS_SECRET_ACCESS_KEY', usernameVariable: 'AWS_ACCESS_KEY_ID')]) {
           dir("${TF_DIR}") {
+            // If you maintain terraform.tfvars, TF will auto-load it.
+            // We still pass jenkins_ip explicitly to avoid mistakes.
             sh """
               set -e
               echo "Planning with jenkins_ip=${JENKINS_IP}"
@@ -109,8 +118,10 @@ pipeline {
                   terraform apply -input=false tfplan
                 '''
               } else {
+                // For destroy, we pass the same var explicitly to satisfy SG rule build.
                 sh """
                   set -e
+                  echo "Destroying with jenkins_ip=${JENKINS_IP}"
                   terraform destroy -auto-approve -input=false -var="jenkins_ip=${JENKINS_IP}"
                 """
               }
@@ -120,11 +131,17 @@ pipeline {
       }
     }
 
-    stage('Terraform Outputs') {
+    stage('Terraform Outputs (apply only)') {
       when { expression { params.WORKFLOW == 'apply' } }
       steps {
         dir("${TF_DIR}") {
-          sh 'terraform output || true'
+          sh '''
+            set +e
+            echo "---- Human-readable outputs ----"
+            terraform output || true
+            echo "---- JSON outputs ----"
+            terraform output -json | jq . || true
+          '''
         }
       }
     }
@@ -135,7 +152,11 @@ pipeline {
       echo 'Pipeline finished.'
       archiveArtifacts artifacts: "${TF_DIR}/tfplan", onlyIfSuccessful: false, allowEmptyArchive: true
     }
-    success { echo '✅ Success!' }
-    failure { echo '❌ Build failed. Check logs above.' }
+    success {
+      echo '✅ Success!'
+    }
+    failure {
+      echo '❌ Build failed. Check logs above.'
+    }
   }
 }
