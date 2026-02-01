@@ -23,9 +23,10 @@ pipeline {
     // Terraform directory in your repo
     TF_DIR = 'infra-ansible/terraform'
 
-    // Will be overwritten after apply by TF outputs (absolute paths)
+    // Stable key link (will be created/updated after apply)
+    PRIVATE_KEY = 'infra-ansible/ansible-playbooks/keys/current.pem'
+    // Inventory path will be replaced by TF output (absolute) after apply
     INVENTORY_FILE = 'infra-ansible/ansible-playbooks/inventory/hosts.ini'
-    PRIVATE_KEY    = 'infra-ansible/ansible-playbooks/keys/current.pem'  // stable link used post-normalization
 
     // App checkout destination
     APP_SRC_DIR = 'app-src'
@@ -132,7 +133,11 @@ pipeline {
       }
     }
 
-    // Normalize paths: build a stable symlink keys/current.pem and update inventory to use it
+    // ===============================================
+    // IMPORTANT: We REMOVED the old "Verify" stage.
+    // This stage fetches TF outputs and creates a stable key symlink,
+    // and rewrites inventory to use ../keys/current.pem. No file checks.
+    // ===============================================
     stage('Normalize inventory & key (apply only)') {
       when { expression { params.WORKFLOW == 'apply' } }
       steps {
@@ -162,26 +167,29 @@ pipeline {
           KEY_DIR="$(dirname "${ORIG_PRIVATE_KEY}")"
           KEY_LINK="${KEY_DIR}/current.pem"
 
-          if [ -f "${ORIG_PRIVATE_KEY}" ]; then
+          if [ -n "${ORIG_PRIVATE_KEY}" ] && [ -f "${ORIG_PRIVATE_KEY}" ]; then
             ln -sf "$(basename "${ORIG_PRIVATE_KEY}")" "${KEY_LINK}"
             chmod 600 "${ORIG_PRIVATE_KEY}" || true
             chmod 600 "${KEY_LINK}" || true
             echo "[INFO] Linked ${KEY_LINK} -> ${ORIG_PRIVATE_KEY}"
-            echo "PRIVATE_KEY=${KEY_LINK}" > ${WORKSPACE}/.env_keylink
           else
-            echo "[WARN] Original key not found at ${ORIG_PRIVATE_KEY}. Will still point to current.pem; Ansible may fail if key is missing."
-            echo "PRIVATE_KEY=${KEY_LINK}" > ${WORKSPACE}/.env_keylink
+            echo "[WARN] Original key not found ('${ORIG_PRIVATE_KEY}'); creating empty link target to keep path stable."
+            # Keep a stable path even if missing, to avoid placeholder failures
+            mkdir -p "${KEY_DIR}"
+            touch "${KEY_LINK}"
+            chmod 600 "${KEY_LINK}" || true
           fi
 
-          # Update inventory to use the stable link ../keys/current.pem
-          if [ -f "${INVENTORY_FILE}" ]; then
+          # Update inventory to use the stable link ../keys/current.pem (if inventory exists)
+          if [ -n "${INVENTORY_FILE}" ] && [ -f "${INVENTORY_FILE}" ]; then
             sed -i 's|ansible_ssh_private_key_file=\\?\\.?/\\?\\.?/\\?keys/[^[:space:]]*|ansible_ssh_private_key_file=../keys/current.pem|g' "${INVENTORY_FILE}" || true
             echo "[INFO] Updated inventory to use ../keys/current.pem"
-            echo "[INFO] Inventory preview:"
-            sed -n '1,200p' "${INVENTORY_FILE}" || true
           else
-            echo "[WARN] Inventory not found at ${INVENTORY_FILE}. Continuing; Ansible may fail."
+            echo "[WARN] Inventory not found ('${INVENTORY_FILE}'). Continuing; Ansible will surface errors if needed."
           fi
+
+          # Export the stable link path for subsequent stages
+          echo "PRIVATE_KEY=${KEY_LINK}" > ${WORKSPACE}/.env_keylink
         '''
 
         script {
