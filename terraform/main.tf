@@ -142,18 +142,17 @@ resource "aws_security_group" "web" {
 }
 
 ###################
-# Generate SSH keypair & avoid duplicates
+# Generate SSH keypair with random suffix to avoid duplicates
 ###################
-# Random suffix so keypair name is unique per workspace
 resource "random_id" "kp" {
-  byte_length = 2 # 4 hex chars
+  byte_length = 2  # 4 hex chars
 }
 
 locals {
   effective_key_name = "${var.keypair_name}-${random_id.kp.hex}"
 }
 
-# Create new key pair
+# Create brand-new key pair
 resource "tls_private_key" "web" {
   algorithm = "RSA"
   rsa_bits  = 4096
@@ -178,7 +177,7 @@ resource "null_resource" "ensure_dirs" {
   }
 }
 
-# Save generated keys locally for Ansible/SSH (gitignore these)
+# Save generated keys locally (gitignore them)
 resource "local_file" "private_key" {
   content         = tls_private_key.web.private_key_pem
   filename        = "${path.module}/../ansible-playbooks/keys/${aws_key_pair.deployer.key_name}.pem"
@@ -383,7 +382,7 @@ resource "local_file" "deployment_summary" {
 }
 
 ###################
-# Outputs (handy for Jenkins)
+# Outputs (absolute paths for Jenkins)
 ###################
 output "effective_keypair_name" {
   description = "The actual AWS key pair name used (with random suffix)"
@@ -391,12 +390,12 @@ output "effective_keypair_name" {
 }
 
 output "generated_private_key_path" {
-  description = "Path to the generated private key"
-  value       = local_file.private_key.filename
+  description = "Absolute path to the generated private key"
+  value       = abspath(local_file.private_key.filename)
   sensitive   = true
 }
 
 output "inventory_path" {
-  description = "Path to the generated Ansible inventory"
-  value       = local_file.ansible_inventory.filename
+  description = "Absolute path to the generated Ansible inventory"
+  value       = abspath(local_file.ansible_inventory.filename)
 }
