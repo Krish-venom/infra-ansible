@@ -10,6 +10,10 @@ terraform {
       source  = "hashicorp/local"
       version = "~> 2.5"
     }
+    null = {
+      source  = "hashicorp/null"
+      version = "~> 3.2"
+    }
   }
 }
 
@@ -18,7 +22,7 @@ provider "aws" {
 }
 
 ################################
-# (Optional) Safer AZ selection
+# Safer Availability Zone selection
 ################################
 data "aws_availability_zones" "available" {}
 
@@ -32,7 +36,8 @@ resource "aws_vpc" "main" {
 
   tags = {
     Name        = "devops-vpc"
-    Environment = "production"
+    Environment = var.environment
+    Project     = var.project_name
     ManagedBy   = "Terraform"
   }
 }
@@ -41,22 +46,22 @@ resource "aws_internet_gateway" "main" {
   vpc_id = aws_vpc.main.id
 
   tags = {
-    Name = "devops-igw"
+    Name        = "devops-igw"
+    Environment = var.environment
+    Project     = var.project_name
   }
 }
 
 resource "aws_subnet" "public" {
   vpc_id                  = aws_vpc.main.id
   cidr_block              = "10.0.1.0/24"
-  # Option A: safer (recommended)
   availability_zone       = data.aws_availability_zones.available.names[0]
-  # Option B: your original (comment out Option A if you prefer this)
-  # availability_zone     = "${var.aws_region}a"
-
   map_public_ip_on_launch = true
 
   tags = {
-    Name = "devops-public-subnet"
+    Name        = "devops-public-subnet"
+    Environment = var.environment
+    Project     = var.project_name
   }
 }
 
@@ -69,7 +74,9 @@ resource "aws_route_table" "public" {
   }
 
   tags = {
-    Name = "devops-public-rt"
+    Name        = "devops-public-rt"
+    Environment = var.environment
+    Project     = var.project_name
   }
 }
 
@@ -104,7 +111,7 @@ resource "aws_security_group" "web" {
     cidr_blocks = ["0.0.0.0/0"]
   }
 
-  # SSH from Jenkins server only (jenkins_ip MUST be a bare IP, e.g., 13.201.85.232)
+  # SSH from Jenkins server only (jenkins_ip must be bare IPv4, no scheme/port)
   ingress {
     description = "SSH from Jenkins"
     from_port   = 22
@@ -123,7 +130,9 @@ resource "aws_security_group" "web" {
   }
 
   tags = {
-    Name = "web-server-sg"
+    Name        = "web-server-sg"
+    Environment = var.environment
+    Project     = var.project_name
   }
 }
 
@@ -135,7 +144,18 @@ resource "aws_key_pair" "deployer" {
   public_key = file(var.public_key_path)
 
   tags = {
-    Name = "webserver-deploy-key"
+    Name        = "webserver-deploy-key"
+    Environment = var.environment
+    Project     = var.project_name
+  }
+}
+
+###################
+# Ensure Ansible inventory directory exists (Terraform cannot create dirs via local_file)
+###################
+resource "null_resource" "ensure_inventory_dir" {
+  provisioner "local-exec" {
+    command = "mkdir -p ${path.module}/../ansible-playbooks/inventory"
   }
 }
 
@@ -144,32 +164,36 @@ resource "aws_key_pair" "deployer" {
 ###################
 resource "aws_instance" "apache" {
   count                  = var.apache_instance_count
-  ami                    = var.ami_id               # Make sure this is an Ubuntu AMI if using apt-get
+  ami                    = var.ami_id                 # Using your AMI
   instance_type          = var.instance_type
   key_name               = aws_key_pair.deployer.key_name
   vpc_security_group_ids = [aws_security_group.web.id]
   subnet_id              = aws_subnet.public.id
+  associate_public_ip_address = true
 
   user_data = <<-EOF
               #!/bin/bash
               set -e
 
-              # Update system
-              apt-get update
-              apt-get upgrade -y
+              # Update system (adjust if your AMI is not Ubuntu/Debian)
+              if command -v apt-get >/dev/null 2>&1; then
+                apt-get update
+                apt-get upgrade -y
+                apt-get install -y apache2 python3 python3-pip
+                systemctl enable apache2
+                systemctl start apache2
+              elif command -v yum >/dev/null 2>&1; then
+                yum update -y
+                yum install -y httpd python3
+                systemctl enable httpd
+                systemctl start httpd
+                ln -s /var/www/html /usr/share/httpd/noindex || true
+              fi
 
-              # Install Apache
-              apt-get install -y apache2
-
-              # Install Python for Ansible
-              apt-get install -y python3 python3-pip
-
-              # Enable and start Apache
-              systemctl enable apache2
-              systemctl start apache2
-
-              # Create a placeholder page
-              cat > /var/www/html/index.html <<HTML
+              # Create a placeholder page (works for both Apache paths)
+              WEBROOT="/var/www/html"
+              [ -d "$WEBROOT" ] || WEBROOT="/usr/share/httpd/noindex"
+              cat > "$WEBROOT/index.html" <<HTML
               <!DOCTYPE html>
               <html>
               <head>
@@ -187,7 +211,6 @@ resource "aws_instance" "apache" {
               </html>
 HTML
 
-              # Log completion
               echo "Apache setup completed at $(date)" >> /var/log/user-data.log
               EOF
 
@@ -195,7 +218,8 @@ HTML
     Name        = "apache-server-${count.index + 1}"
     Role        = "webserver"
     ServerType  = "apache"
-    Environment = "production"
+    Environment = var.environment
+    Project     = var.project_name
     ManagedBy   = "Terraform"
   }
 
@@ -209,32 +233,34 @@ HTML
 ###################
 resource "aws_instance" "nginx" {
   count                  = var.nginx_instance_count
-  ami                    = var.ami_id               # Make sure this is an Ubuntu AMI if using apt-get
+  ami                    = var.ami_id                 # Using your AMI
   instance_type          = var.instance_type
   key_name               = aws_key_pair.deployer.key_name
   vpc_security_group_ids = [aws_security_group.web.id]
   subnet_id              = aws_subnet.public.id
+  associate_public_ip_address = true
 
   user_data = <<-EOF
               #!/bin/bash
               set -e
 
-              # Update system
-              apt-get update
-              apt-get upgrade -y
+              if command -v apt-get >/dev/null 2>&1; then
+                apt-get update
+                apt-get upgrade -y
+                apt-get install -y nginx python3 python3-pip
+                systemctl enable nginx
+                systemctl start nginx
+                WEBROOT="/var/www/html"
+                rm -f /var/www/html/index.nginx-debian.html || true
+              elif command -v yum >/dev/null 2>&1; then
+                yum update -y
+                amazon-linux-extras install -y nginx1 || yum install -y nginx
+                systemctl enable nginx
+                systemctl start nginx
+                WEBROOT="/usr/share/nginx/html"
+              fi
 
-              # Install Nginx
-              apt-get install -y nginx
-
-              # Install Python for Ansible
-              apt-get install -y python3 python3-pip
-
-              # Enable and start Nginx
-              systemctl enable nginx
-              systemctl start nginx
-
-              # Create a placeholder page
-              cat > /var/www/html/index.html <<HTML
+              cat > "$WEBROOT/index.html" <<HTML
               <!DOCTYPE html>
               <html>
               <head>
@@ -252,10 +278,6 @@ resource "aws_instance" "nginx" {
               </html>
 HTML
 
-              # Remove default nginx page
-              rm -f /var/www/html/index.nginx-debian.html
-
-              # Log completion
               echo "Nginx setup completed at $(date)" >> /var/log/user-data.log
               EOF
 
@@ -263,7 +285,8 @@ HTML
     Name        = "nginx-server-${count.index + 1}"
     Role        = "webserver"
     ServerType  = "nginx"
-    Environment = "production"
+    Environment = var.environment
+    Project     = var.project_name
     ManagedBy   = "Terraform"
   }
 
@@ -282,7 +305,11 @@ resource "local_file" "ansible_inventory" {
   })
   filename = "${path.module}/../ansible-playbooks/inventory/hosts.ini"
 
-  depends_on = [aws_instance.apache, aws_instance.nginx]
+  depends_on = [
+    null_resource.ensure_inventory_dir,
+    aws_instance.apache,
+    aws_instance.nginx
+  ]
 }
 
 ###################
@@ -323,4 +350,3 @@ resource "local_file" "deployment_summary" {
 
   filename = "${path.module}/deployment-summary.txt"
 }
-``
