@@ -47,21 +47,18 @@ variable "project_name" {
   default     = "devops-webapp"
 }
 
-# 👉 Existing VPC ID to use (your default VPC)
 variable "vpc_id" {
   description = "Existing VPC ID to deploy into"
   type        = string
   default     = "vpc-0bb695c41dc9db0a4"
 }
 
-# Optional: specific subnet ID in that VPC; leave empty to auto-pick the first subnet in the VPC
 variable "subnet_id" {
   description = "Existing subnet ID in the VPC; if empty, the first subnet in that VPC is used"
   type        = string
   default     = ""
 }
 
-# Reuse existing SG or create a new one
 variable "reuse_existing_sg" {
   description = "Reuse an existing SG named existing_sg_name in the selected VPC (true) or create a new one (false)"
   type        = bool
@@ -74,7 +71,6 @@ variable "existing_sg_name" {
   default     = "web-server-sg"
 }
 
-# Base key pair name; a random suffix is added to avoid duplicates
 variable "keypair_name" {
   description = "Base name for the generated AWS key pair and local key files"
   type        = string
@@ -118,7 +114,7 @@ variable "instance_type" {
 variable "ami_id" {
   description = "AMI ID (Ubuntu recommended if using apt-get in user_data)"
   type        = string
-  default     = "ami-019715e0d74f695be"  # Ensure this exists in your region
+  default     = "ami-019715e0d74f695be"
 
   validation {
     condition     = length(var.ami_id) > 0 && can(regex("^ami-[0-9a-fA-F]{8,}$", var.ami_id))
@@ -127,7 +123,7 @@ variable "ami_id" {
 }
 
 variable "jenkins_ip" {
-  description = "Public IPv4 of Jenkins (bare IP, no scheme/port), e.g., 3.110.120.129"
+  description = "Public IPv4 of Jenkins (bare IP, no scheme/port)"
   type        = string
 
   validation {
@@ -148,12 +144,10 @@ provider "aws" {
 # ---------- Data Sources ----------
 ################################
 
-# Reuse existing VPC by ID
 data "aws_vpc" "selected" {
   id = var.vpc_id
 }
 
-# Get all subnets in that VPC; we'll pick the first unless you pass var.subnet_id
 data "aws_subnets" "in_vpc" {
   filter {
     name   = "vpc-id"
@@ -161,7 +155,6 @@ data "aws_subnets" "in_vpc" {
   }
 }
 
-# Reuse an existing SG by name in this VPC (when toggled on)
 data "aws_security_group" "existing_web" {
   count = var.reuse_existing_sg ? 1 : 0
 
@@ -181,7 +174,6 @@ data "aws_security_group" "existing_web" {
 ################################
 
 locals {
-  # Prefer a specific subnet if provided, else pick the first found in the VPC
   selected_subnet_id = var.subnet_id != "" ? var.subnet_id : data.aws_subnets.in_vpc.ids[0]
 }
 
@@ -191,7 +183,7 @@ locals {
 
 resource "random_id" "sg" {
   count       = var.reuse_existing_sg ? 0 : 1
-  byte_length = 2  # 4 hex chars
+  byte_length = 2
 }
 
 resource "aws_security_group" "web" {
@@ -200,7 +192,6 @@ resource "aws_security_group" "web" {
   description = "Security group for web servers"
   vpc_id      = data.aws_vpc.selected.id
 
-  # HTTP
   ingress {
     description = "HTTP from anywhere"
     from_port   = 80
@@ -209,7 +200,6 @@ resource "aws_security_group" "web" {
     cidr_blocks = ["0.0.0.0/0"]
   }
 
-  # HTTPS
   ingress {
     description = "HTTPS from anywhere"
     from_port   = 443
@@ -218,7 +208,6 @@ resource "aws_security_group" "web" {
     cidr_blocks = ["0.0.0.0/0"]
   }
 
-  # SSH from Jenkins only (bare IPv4 + /32)
   ingress {
     description = "SSH from Jenkins"
     from_port   = 22
@@ -227,7 +216,6 @@ resource "aws_security_group" "web" {
     cidr_blocks = ["${var.jenkins_ip}/32"]
   }
 
-  # Outbound: all
   egress {
     description = "Allow all outbound"
     from_port   = 0
@@ -243,33 +231,27 @@ resource "aws_security_group" "web" {
   }
 }
 
-# Unified SG ID regardless of reuse vs create
 locals {
-  web_sg_id = var.reuse_existing_sg
-    ? data.aws_security_group.existing_web[0].id
-    : aws_security_group.web[0].id
+  web_sg_id = var.reuse_existing_sg ? data.aws_security_group.existing_web[0].id : aws_security_group.web[0].id
 }
 
 ################################
 # ---------- Key Pair Generation ----------
 ################################
 
-# Random suffix to avoid AWS duplicate key errors
 resource "random_id" "kp" {
-  byte_length = 2  # 4 hex chars, e.g., f039
+  byte_length = 2
 }
 
 locals {
   effective_key_name = "${var.keypair_name}-${random_id.kp.hex}"
 }
 
-# Generate new private/public key
 resource "tls_private_key" "web" {
   algorithm = "RSA"
   rsa_bits  = 4096
 }
 
-# Register public key in AWS
 resource "aws_key_pair" "deployer" {
   key_name   = local.effective_key_name
   public_key = tls_private_key.web.public_key_openssh
@@ -282,14 +264,12 @@ resource "aws_key_pair" "deployer" {
   }
 }
 
-# Ensure local dirs for inventory & keys exist
 resource "null_resource" "ensure_dirs" {
   provisioner "local-exec" {
     command = "mkdir -p ${path.module}/../ansible-playbooks/inventory ${path.module}/../ansible-playbooks/keys"
   }
 }
 
-# Save generated keys locally (gitignore these)
 resource "local_file" "private_key" {
   content         = tls_private_key.web.private_key_pem
   filename        = "${path.module}/../ansible-playbooks/keys/${aws_key_pair.deployer.key_name}.pem"
