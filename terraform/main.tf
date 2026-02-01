@@ -367,4 +367,3 @@ resource "local_file" "deployment_summary" {
 
   filename = "${path.module}/deployment-summary.txt"
 }
-``
