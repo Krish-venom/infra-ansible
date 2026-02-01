@@ -6,8 +6,8 @@ apache_instance_count = 2
 nginx_instance_count  = 2
 instance_type         = "t3.micro"
 
-# Update this with your Jenkins server's public IP
-jenkins_ip = "http://http://3.110.120.129:8080/"
+# MUST BE ONLY THE PUBLIC IP OF JENKINS (NO http://, NO PORT, NO SLASH)
+jenkins_ip = "3.110.120.129"
 
 # Update this if your SSH key is in a different location
 public_key_path = "/var/lib/jenkins/.ssh/webserver-key.pub"
