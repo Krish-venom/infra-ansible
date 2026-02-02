@@ -76,8 +76,10 @@ pipeline {
         dir(env.TERRAFORM_DIR) {
           sh '''
             set -eux
-            # Need Python 3 to generate inventory (venv comes next).
-            python3 --version >/dev/null 2>&1 || { echo "python3 not found on agent. Install python3."; exit 1; }
+
+            # Need Python 3 to generate inventory JSON -> INI
+            command -v python3 >/dev/null 2>&1 || { echo "python3 not found on agent. Install python3."; exit 1; }
+            python3 --version
 
             terraform output -json > tf_outputs.json
 
@@ -120,22 +122,49 @@ PY
           '''
         }
 
-        // ✅ Create virtualenv and install Ansible (the missing step before)
+        // ✅ Create venv RELIABLY and install Ansible
         sh '''
           set -eux
 
-          # Ensure venv capability exists
-          python3 -m venv --help >/dev/null 2>&1 || { 
-            echo "python3-venv not available. Please install python3-venv (Ubuntu/Debian: apt-get install -y python3-venv)."; 
-            exit 1; 
-          }
+          echo "Creating/repairing Python venv at: ${VENV}"
 
-          # Create venv if missing
+          # 1) Try standard venv if missing
           if [ ! -d "${VENV}" ]; then
-            python3 -m venv "${VENV}"
+            if python3 -c "import venv" 2>/dev/null; then
+              python3 -m venv "${VENV}" || true
+            fi
           fi
 
-          # Use python -m pip to avoid pip path issues
+          # 2) If still missing, bootstrap ensurepip then retry venv
+          if [ ! -d "${VENV}" ]; then
+            python3 -m ensurepip --upgrade || true
+            if python3 -c "import venv" 2>/dev/null; then
+              python3 -m venv "${VENV}" || true
+            fi
+          fi
+
+          # 3) Fallback: use virtualenv in user site
+          if [ ! -d "${VENV}" ]; then
+            python3 -m pip install --user --upgrade pip || true
+            python3 -m pip install --user virtualenv || true
+            USER_BASE="$(python3 -c "import site; print(site.USER_BASE)")"
+            USER_BIN="${USER_BASE}/bin"
+            if [ -x "${USER_BIN}/virtualenv" ]; then
+              "${USER_BIN}/virtualenv" "${VENV}"
+            else
+              python3 -m virtualenv "${VENV}"
+            fi
+          fi
+
+          # 4) Validate venv and ensure pip inside venv
+          if [ ! -x "${VENV}/bin/python" ]; then
+            echo "ERROR: venv Python not found at ${VENV}/bin/python"
+            ls -la "${VENV}" || true
+            exit 1
+          fi
+          "${VENV}/bin/python" -m ensurepip --upgrade || true
+
+          # Install Ansible in venv
           "${VENV}/bin/python" -m pip install --upgrade pip
           "${VENV}/bin/python" -m pip install --upgrade ansible
 
