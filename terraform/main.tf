@@ -55,7 +55,7 @@ variable "subnet_id" {
 
 variable "reuse_existing_sg" {
   type    = bool
-  default = true
+  default = false   # force Terraform to create new SG
 }
 
 variable "existing_sg_name" {
@@ -124,20 +124,6 @@ data "aws_subnets" "in_vpc" {
   }
 }
 
-data "aws_security_group" "existing_web" {
-  count = var.reuse_existing_sg ? 1 : 0
-
-  filter {
-    name   = "group-name"
-    values = [var.existing_sg_name]
-  }
-
-  filter {
-    name   = "vpc-id"
-    values = [data.aws_vpc.selected.id]
-  }
-}
-
 data "aws_ami" "ubuntu" {
   most_recent = true
   owners      = ["099720109477"] # Canonical
@@ -194,14 +180,23 @@ locals {
 }
 
 ########################################
-# Security Group (create new if not reusing)
+# Security Group (new SG with correct rules)
 ########################################
 resource "aws_security_group" "web" {
-  count       = var.reuse_existing_sg ? 0 : 1
   name        = "${var.project_name}-web-sg-${var.environment}"
   description = "Web security group for ${var.project_name} (${var.environment})"
   vpc_id      = data.aws_vpc.selected.id
 
+  # Allow SSH only from Jenkins agent IP
+  ingress {
+    description = "SSH from Jenkins agent"
+    from_port   = 22
+    to_port     = 22
+    protocol    = "tcp"
+    cidr_blocks = ["3.110.85.249/32"]
+  }
+
+  # Allow HTTP from anywhere
   ingress {
     description = "HTTP"
     from_port   = 80
@@ -210,6 +205,7 @@ resource "aws_security_group" "web" {
     cidr_blocks = ["0.0.0.0/0"]
   }
 
+  # Allow HTTPS from anywhere
   ingress {
     description = "HTTPS"
     from_port   = 443
@@ -218,15 +214,7 @@ resource "aws_security_group" "web" {
     cidr_blocks = ["0.0.0.0/0"]
   }
 
-  # Restrict this in production!
-  ingress {
-    description = "SSH"
-    from_port   = 22
-    to_port     = 22
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
+  # Allow all outbound traffic
   egress {
     from_port   = 0
     to_port     = 0
@@ -240,7 +228,7 @@ resource "aws_security_group" "web" {
 }
 
 locals {
-  web_sg_id = var.reuse_existing_sg ? data.aws_security_group.existing_web[0].id : aws_security_group.web[0].id
+  web_sg_id = aws_security_group.web.id
 }
 
 ########################################
