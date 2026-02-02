@@ -17,7 +17,7 @@ pipeline {
 
   environment {
     AWS_DEFAULT_REGION = 'ap-south-1'
-    JENKINS_IP = '3.110.120.129'   // bare IP only
+    JENKINS_IP = '3.110.85.249'   // bare IP only
     TF_DIR = 'infra-ansible/terraform'
     INVENTORY_FILE = 'infra-ansible/ansible-playbooks/inventory/hosts.ini'
     PRIVATE_KEY    = 'infra-ansible/ansible-playbooks/keys/current.pem'
