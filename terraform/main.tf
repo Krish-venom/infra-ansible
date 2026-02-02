@@ -75,9 +75,8 @@ variable "create_key_pair" {
   default = true
 }
 
-# If you already have a public key (OpenSSH format), set it here (optional).
-# When set (and create_key_pair = true), Terraform will create the AWS key pair from this public key.
-# When empty and create_key_pair = true, Terraform will GENERATE a new key pair and save the private key PEM locally (0600).
+# Optional: if you already have a public key (OpenSSH format), set it here.
+# When empty and create_key_pair = true, Terraform GENERATES a new keypair and writes a PEM locally.
 variable "public_key_openssh" {
   type    = string
   default = ""
@@ -182,8 +181,7 @@ locals {
 ########################################
 
 # Generate a new RSA key only if:
-#  - create_key_pair = true
-#  - public_key_openssh is NOT provided (we will generate a new key then)
+#  - create_key_pair = true AND public_key_openssh == ""
 resource "tls_private_key" "generated" {
   count     = var.create_key_pair && var.public_key_openssh == "" ? 1 : 0
   algorithm = "RSA"
@@ -194,12 +192,11 @@ resource "tls_private_key" "generated" {
 resource "aws_key_pair" "this" {
   count     = var.create_key_pair ? 1 : 0
   key_name  = var.keypair_name
-  public_key = var.public_key_openssh != "" ?
-    var.public_key_openssh :
-    tls_private_key.generated[0].public_key_openssh
+  # IMPORTANT: keep this as a single-line conditional to avoid parse issues
+  public_key = var.public_key_openssh != "" ? var.public_key_openssh : tls_private_key.generated[0].public_key_openssh
 }
 
-# If we generated a key (no public key provided), write the private key to a local file (0600)
+# If we generated a key, write the private key to a local file (0600)
 resource "local_file" "generated_pem" {
   count           = var.create_key_pair && var.public_key_openssh == "" ? 1 : 0
   filename        = "${path.module}/generated_${var.keypair_name}.pem"
@@ -325,7 +322,6 @@ output "nginx_public_ips" {
   value       = [for i in aws_instance.nginx : i.public_ip]
 }
 
-# Useful outputs for Jenkins/Ansible
 output "key_name_used" {
   description = "Key pair name used by instances."
   value       = local.selected_key_name
