@@ -7,7 +7,7 @@ pipeline {
     choice(name: 'ACTION', choices: ['plan', 'apply', 'destroy'], description: 'Terraform action to run')
     booleanParam(name: 'AUTO_APPROVE', defaultValue: true, description: 'Auto-approve apply/destroy')
 
-    // Your app (Weather-site) defaults. If a trigger job passes different values, we’ll use those.
+    // Your app (Weather-site) defaults. You can override at build time.
     string(name: 'APP_REPO_URL', defaultValue: 'https://github.com/Krish-venom/Weather-site.git', description: 'Git URL of the app to deploy')
     string(name: 'APP_BRANCH',   defaultValue: 'main', description: 'Branch to deploy')
 
@@ -22,7 +22,7 @@ pipeline {
     ANSIBLE_DIR      = 'ansible-playbooks'
     ANSIBLE_HOST_KEY_CHECKING = 'False'
     VENV     = '.venv-ansible'     // venv in workspace root
-    APP_SRC  = 'app-src'           // folder to clone app
+    APP_SRC  = 'app-src'           // folder to clone the app
     ARTIFACT = 'app.tar.gz'        // app bundle uploaded by Ansible
   }
 
@@ -42,42 +42,33 @@ pipeline {
 
     stage('Checkout Application (Weather-site)') {
       steps {
-        script {
-          // Compute safe defaults in Groovy, then export to the shell
-          def APP_REPO_URL_SAFE = (params.APP_REPO_URL?.trim()) ? params.APP_REPO_URL.trim() : 'https://github.com/Krish-venom/Weather-site.git'
-          def APP_BRANCH_SAFE   = (params.APP_BRANCH?.trim())   ? params.APP_BRANCH.trim()   : 'main'
+        // Use shell defaults so set -u never fails if params/environment aren't exported
+        sh '''
+          set -euo pipefail
+          : "${APP_REPO_URL:=https://github.com/Krish-venom/Weather-site.git}"
+          : "${APP_BRANCH:=main}"
+          : "${APP_SRC:=app-src}"
 
-          withEnv([
-            "APP_REPO_URL=${APP_REPO_URL_SAFE}",
-            "APP_BRANCH=${APP_BRANCH_SAFE}",
-            "APP_SRC=${env.APP_SRC}"
-          ]) {
-            sh """
-              set -euo pipefail
-              echo "Cloning app: \${APP_REPO_URL} (branch=\${APP_BRANCH})"
-              rm -rf "\${APP_SRC}"
-              git clone --branch "\${APP_BRANCH}" --depth 1 "\${APP_REPO_URL}" "\${APP_SRC}"
-              ls -la "\${APP_SRC}" || true
-            """
-          }
-        }
+          echo "Cloning app: ${APP_REPO_URL} (branch=${APP_BRANCH})"
+          rm -rf "${APP_SRC}"
+          git clone --branch "${APP_BRANCH}" --depth 1 "${APP_REPO_URL}" "${APP_SRC}"
+          ls -la "${APP_SRC}" || true
+        '''
       }
     }
 
     stage('Package Application') {
       steps {
-        withEnv([
-          "APP_SRC=${env.APP_SRC}",
-          "ARTIFACT=${env.ARTIFACT}"
-        ]) {
-          sh """
-            set -euo pipefail
-            rm -f "\${ARTIFACT}"
-            # Package the Weather-site (static HTML/CSS/JS) excluding .git
-            tar --exclude='.git' -czf "\${ARTIFACT}" -C "\${APP_SRC}" .
-            ls -lh "\${ARTIFACT}"
-          """
-        }
+        sh """
+          set -euo pipefail
+          : "\${ARTIFACT:=app.tar.gz}"
+          : "\${APP_SRC:=app-src}"
+
+          rm -f "\${ARTIFACT}"
+          # Package the Weather-site (static HTML/CSS/JS) excluding .git
+          tar --exclude='.git' -czf "\${ARTIFACT}" -C "\${APP_SRC}" .
+          ls -lh "\${ARTIFACT}"
+        """
       }
     }
 
@@ -90,6 +81,7 @@ pipeline {
             sh """
               set -eux
               test -n "\$(ls -1 *.tf 2>/dev/null || true)" || { echo "No .tf files in \$(pwd)"; exit 1; }
+
               terraform fmt -recursive
               terraform init -input=false
               terraform validate
@@ -123,7 +115,7 @@ pipeline {
     stage('Ansible Configure + Deploy (mandatory after apply)') {
       when { expression { params.ACTION == 'apply' } }
       steps {
-        // 1) Build inventory & capture absolute PEM path (from Terraform outputs)
+        // 1) Build inventory from Terraform outputs and capture ABSOLUTE PEM path if generated
         dir(env.TERRAFORM_DIR) {
           sh """
             set -eux
@@ -166,7 +158,7 @@ PY
           """
         }
 
-        // 2) Create venv at workspace root and install Ansible (robust)
+        // 2) Create venv at workspace root and install Ansible (robust: ensurepip + virtualenv fallback)
         sh """
           set -eux
 
@@ -202,7 +194,7 @@ PY
           test -x "\${WORKSPACE}/${VENV}/bin/ansible-playbook" || { echo "ansible-playbook missing"; exit 1; }
         """
 
-        // 3) Run Ansible (absolute paths for everything)
+        // 3) Run Ansible using ABSOLUTE PATHS for everything
         script {
           def pemPathAbs       = readFile(file: 'ANSIBLE_PEM_PATH.txt').trim()
           def ansiblePlaybook  = "${env.WORKSPACE}/${env.VENV}/bin/ansible-playbook"
