@@ -1,108 +1,100 @@
-
 ---
-- name: Configure and deploy web servers
-  hosts: webservers
+# deploy.yml
+# Vars expected:
+#   artifact_path: absolute path to app.tar.gz on the controller (Jenkins)
+
+- name: Deploy to Apache instances
+  hosts: apache
   become: true
-  gather_facts: true
-
   vars:
-    web_src: "{{ lookup('env', 'WEB_SOURCE_DIR') | default('../web-src', true) }}"
-    web_root: "/var/www/html"
-    use_rsync: true
-
-  pre_tasks:
-    - name: Validate web source exists in Jenkins workspace
-      delegate_to: localhost
-      run_once: true
-      stat:
-        path: "{{ web_src }}"
-      register: websrc_stat
-
-    - name: Fail if web source directory not found
-      delegate_to: localhost
-      run_once: true
-      fail:
-        msg: >
-          Web source directory '{{ web_src }}' not found on Jenkins workspace.
-          Ensure Jenkins checked out the Weather-site repo and WEB_SOURCE_DIR is set.
-      when: not websrc_stat.stat.exists
-
+    apache_root: /var/www/html
   tasks:
-    - name: Update apt cache (Debian/Ubuntu)
-      apt:
-        update_cache: yes
-        cache_valid_time: 1800
-      when: ansible_os_family == "Debian"
-
-    - name: Install required packages (nginx, rsync)
-      apt:
-        name: [nginx, rsync]
+    - name: Install Apache
+      ansible.builtin.apt:
+        name: apache2
         state: present
-      when: ansible_os_family == "Debian"
-      notify: restart nginx
+        update_cache: true
 
-    - name: Ensure NGINX service is enabled and running
-      service:
-        name: nginx
-        state: started
-        enabled: yes
-
-    - name: Ensure web root exists
-      file:
-        path: "{{ web_root }}"
+    - name: Ensure Apache root exists
+      ansible.builtin.file:
+        path: "{{ apache_root }}"
         state: directory
         owner: www-data
         group: www-data
-        mode: '0755'
+        mode: "0755"
 
-    - name: Deploy website content using rsync (fast & removes stale files)
-      synchronize:
-        src: "{{ web_src }}/"
-        dest: "{{ web_root }}/"
-        rsync_opts:
-          - "--delete"
-      when: use_rsync
-      notify: fix permissions
+    - name: Upload artifact
+      ansible.builtin.copy:
+        src: "{{ artifact_path }}"
+        dest: /tmp/app.tar.gz
+        mode: "0644"
 
-    - name: Deploy website content using copy (fallback)
-      copy:
-        src: "{{ web_src }}/"
-        dest: "{{ web_root }}/"
+    - name: Clean Apache root
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      with_fileglob:
+        - "{{ apache_root }}/*"
+
+    - name: Unpack into Apache root
+      ansible.builtin.unarchive:
+        src: /tmp/app.tar.gz
+        dest: "{{ apache_root }}"
+        remote_src: true
         owner: www-data
         group: www-data
-        mode: '0644'
-      when: not use_rsync
-      notify: fix permissions
+        mode: "0644"
 
-    - name: Ensure index.html exists if empty repo (sanity page)
-      copy:
-        dest: "{{ web_root }}/index.html"
-        content: |
-          <!doctype html>
-          <html>
-            <head><meta charset="utf-8"/><title>Deployed via Ansible</title></head>
-            <body><h1>✅ Deployment Successful</h1><p>Host: {{ inventory_hostname }}</p></body>
-          </html>
-        owner: www-data
-        group: www-data
-        mode: '0644'
-      when: not (websrc_stat.stat.isdir | default(false))
-      notify: reload nginx
+    - name: Enable & restart Apache
+      ansible.builtin.service:
+        name: apache2
+        state: restarted
+        enabled: true
 
-  handlers:
-    - name: fix permissions
-      file:
-        path: "{{ web_root }}"
-        owner: www-data
-        group: www-data
-        recurse: yes
-
-    - name: reload nginx
-      service:
+- name: Deploy to Nginx instances
+  hosts: nginx
+  become: true
+  vars:
+    nginx_root: /usr/share/nginx/html
+  tasks:
+    - name: Install Nginx
+      ansible.builtin.apt:
         name: nginx
-        state: reloaded
+        state: present
+        update_cache: true
 
-    - name: restart nginx
-      service:
+    - name: Ensure Nginx root exists
+      ansible.builtin.file:
+        path: "{{ nginx_root }}"
+        state: directory
+        owner: www-data
+        group: www-data
+        mode: "0755"
+
+    - name: Upload artifact
+      ansible.builtin.copy:
+        src: "{{ artifact_path }}"
+        dest: /tmp/app.tar.gz
+        mode: "0644"
+
+    - name: Clean Nginx root
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      with_fileglob:
+        - "{{ nginx_root }}/*"
+
+    - name: Unpack into Nginx root
+      ansible.builtin.unarchive:
+        src: /tmp/app.tar.gz
+        dest: "{{ nginx_root }}"
+        remote_src: true
+        owner: www-data
+        group: www-data
+        mode: "0644"
+
+    - name: Enable & restart Nginx
+      ansible.builtin.service:
         name: nginx
         state: restarted
+        enabled: true
