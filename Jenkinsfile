@@ -38,9 +38,6 @@ pipeline {
           dir(env.TERRAFORM_DIR) {
             sh '''
               set -eux
-              aws --version || true
-              aws sts get-caller-identity || true
-
               test -n "$(ls -1 *.tf 2>/dev/null || true)" || { echo "No .tf files in $(pwd)"; exit 1; }
 
               terraform fmt -recursive
@@ -81,10 +78,9 @@ pipeline {
         dir(env.TERRAFORM_DIR) {
           sh '''
             set -eux
-            # Fetch outputs as JSON
             terraform output -json > tf_outputs.json
 
-            # Generate inventory from outputs (apache_public_ips, nginx_public_ips, ansible_user)
+            # Generate inventory from outputs
             python3 - <<'PY'
 import json
 with open('tf_outputs.json') as f:
@@ -105,13 +101,12 @@ open('ansible_inventory.ini', 'w').write(inv)
 print("Generated inventory:\\n" + inv)
 PY
 
-            # Decide which private key to use:
+            # Find generated PEM (if any)
             GEN_PEM="$(terraform output -raw generated_private_key_path 2>/dev/null || true)"
             if [ -n "${GEN_PEM}" ] && [ -f "${GEN_PEM}" ]; then
               echo "Using generated PEM: ${GEN_PEM}"
               echo "${GEN_PEM}" > ../ANSIBLE_PEM_PATH.txt
             else
-              echo "No generated PEM found; will fall back to Jenkins SSH credential in the next step."
               echo "" > ../ANSIBLE_PEM_PATH.txt
             fi
           '''
@@ -120,7 +115,6 @@ PY
         script {
           def pemPath = readFile(file: 'ANSIBLE_PEM_PATH.txt').trim()
           if (pemPath) {
-            // Use the generated PEM file directly
             dir(env.ANSIBLE_DIR) {
               sh """
                 set -eux
@@ -130,7 +124,6 @@ PY
               """
             }
           } else {
-            // Fall back to Jenkins SSH private key credential
             withCredentials([sshUserPrivateKey(credentialsId: params.SSH_KEY_CRED_ID, keyFileVariable: 'SSH_KEY', usernameVariable: 'SSH_USER')]) {
               dir(env.ANSIBLE_DIR) {
                 sh """
