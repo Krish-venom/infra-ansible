@@ -1,19 +1,25 @@
 ---
 # deploy.yml
 # Vars expected:
-#   artifact_path: absolute path to app.tar.gz on the controller (Jenkins)
+#   app_repo_url: Git URL of the app (e.g. https://github.com/Krish-venom/Weather-site.git)
+#   app_branch:   Branch to deploy (default: main)
 
 - name: Deploy to Apache instances
   hosts: apache
   become: true
   vars:
     apache_root: /var/www/html
+    app_repo_url: "{{ app_repo_url | default('https://github.com/Krish-venom/Weather-site.git') }}"
+    app_branch: "{{ app_branch | default('main') }}"
   tasks:
-    - name: Install Apache
+    - name: Install Apache and Git
       ansible.builtin.apt:
-        name: apache2
+        name: "{{ item }}"
         state: present
         update_cache: true
+      loop:
+        - apache2
+        - git
 
     - name: Ensure Apache root exists
       ansible.builtin.file:
@@ -23,12 +29,6 @@
         group: www-data
         mode: "0755"
 
-    - name: Upload artifact
-      ansible.builtin.copy:
-        src: "{{ artifact_path }}"
-        dest: /tmp/app.tar.gz
-        mode: "0644"
-
     - name: Clean Apache root
       ansible.builtin.file:
         path: "{{ item }}"
@@ -36,14 +36,20 @@
       with_fileglob:
         - "{{ apache_root }}/*"
 
-    - name: Unpack into Apache root
-      ansible.builtin.unarchive:
-        src: /tmp/app.tar.gz
+    - name: Clone application repo into Apache root
+      ansible.builtin.git:
+        repo: "{{ app_repo_url }}"
         dest: "{{ apache_root }}"
-        remote_src: true
+        version: "{{ app_branch }}"
+        force: true
+
+    - name: Set permissions for Apache root
+      ansible.builtin.file:
+        path: "{{ apache_root }}"
         owner: www-data
         group: www-data
-        mode: "0644"
+        mode: "0755"
+        recurse: true
 
     - name: Enable & restart Apache
       ansible.builtin.service:
@@ -56,12 +62,17 @@
   become: true
   vars:
     nginx_root: /usr/share/nginx/html
+    app_repo_url: "{{ app_repo_url | default('https://github.com/Krish-venom/Weather-site.git') }}"
+    app_branch: "{{ app_branch | default('main') }}"
   tasks:
-    - name: Install Nginx
+    - name: Install Nginx and Git
       ansible.builtin.apt:
-        name: nginx
+        name: "{{ item }}"
         state: present
         update_cache: true
+      loop:
+        - nginx
+        - git
 
     - name: Ensure Nginx root exists
       ansible.builtin.file:
@@ -71,12 +82,6 @@
         group: www-data
         mode: "0755"
 
-    - name: Upload artifact
-      ansible.builtin.copy:
-        src: "{{ artifact_path }}"
-        dest: /tmp/app.tar.gz
-        mode: "0644"
-
     - name: Clean Nginx root
       ansible.builtin.file:
         path: "{{ item }}"
@@ -84,14 +89,20 @@
       with_fileglob:
         - "{{ nginx_root }}/*"
 
-    - name: Unpack into Nginx root
-      ansible.builtin.unarchive:
-        src: /tmp/app.tar.gz
+    - name: Clone application repo into Nginx root
+      ansible.builtin.git:
+        repo: "{{ app_repo_url }}"
         dest: "{{ nginx_root }}"
-        remote_src: true
+        version: "{{ app_branch }}"
+        force: true
+
+    - name: Set permissions for Nginx root
+      ansible.builtin.file:
+        path: "{{ nginx_root }}"
         owner: www-data
         group: www-data
-        mode: "0644"
+        mode: "0755"
+        recurse: true
 
     - name: Enable & restart Nginx
       ansible.builtin.service:
