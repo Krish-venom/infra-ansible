@@ -251,3 +251,69 @@ resource "aws_instance" "apache" {
   ami                         = data.aws_ami.ubuntu.id
   instance_type               = var.instance_type
   subnet_id                   = local.selected_subnet_id
+  vpc_security_group_ids      = [local.web_sg_id]
+  key_name                    = local.selected_key_name
+  associate_public_ip_address = true
+
+  tags = merge(local.common_tags, {
+    Name = "${var.project_name}-apache-${count.index + 1}-${var.environment}"
+    Role = "apache"
+  })
+}
+
+########################################
+# EC2 Instances - Nginx
+########################################
+resource "aws_instance" "nginx" {
+  count                       = var.nginx_instance_count
+  ami                         = data.aws_ami.ubuntu.id
+  instance_type               = var.instance_type
+  subnet_id                   = local.selected_subnet_id
+  vpc_security_group_ids      = [local.web_sg_id]
+  key_name                    = local.selected_key_name
+  associate_public_ip_address = true
+
+  tags = merge(local.common_tags, {
+    Name = "${var.project_name}-nginx-${count.index + 1}-${var.environment}"
+    Role = "nginx"
+  })
+}
+
+########################################
+# Outputs
+########################################
+output "subnet_id_used" {
+  description = "The subnet ID used for EC2 instances."
+  value       = local.selected_subnet_id
+}
+
+output "security_group_id" {
+  description = "ID of the security group used by instances."
+  value       = local.web_sg_id
+}
+
+output "apache_public_ips" {
+  description = "Public IPs of Apache instances."
+  value       = [for i in aws_instance.apache : i.public_ip]
+}
+
+output "nginx_public_ips" {
+  description = "Public IPs of Nginx instances."
+  value       = [for i in aws_instance.nginx : i.public_ip]
+}
+
+output "key_name_used" {
+  description = "Key pair name used by instances."
+  value       = local.selected_key_name
+}
+
+output "generated_private_key_path" {
+  description = "Path to the generated PEM (if Terraform generated a key). Empty otherwise."
+  value       = var.create_key_pair && var.public_key_openssh == "" ? local_file.generated_pem[0].filename : ""
+  sensitive   = false
+}
+
+output "ansible_user" {
+  description = "Default Ansible SSH user for the AMI."
+  value       = var.ansible_user
+}
