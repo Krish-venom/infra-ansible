@@ -7,7 +7,7 @@ pipeline {
     choice(name: 'ACTION', choices: ['plan', 'apply', 'destroy'], description: 'Terraform action to run')
     booleanParam(name: 'AUTO_APPROVE', defaultValue: true, description: 'Auto-approve apply/destroy (recommended)')
     string(name: 'SSH_KEY_CRED_ID', defaultValue: 'ssh_key', description: 'Fallback Jenkins SSH Private Key Credential ID (used if no PEM was generated)')
-    string(name: 'ANSIBLE_PLAYBOOK', defaultValue: 'site.yml', description: 'Playbook to run from ansible-playbooks/ (e.g., site.yml)')
+    string(name: 'ANSIBLE_PLAYBOOK', defaultValue: 'deploy.yml', description: 'Playbook to run from ansible-playbooks/ (e.g., deploy.yml or site.yml)')
   }
 
   environment {
@@ -15,7 +15,7 @@ pipeline {
     TERRAFORM_DIR    = 'terraform'
     ANSIBLE_DIR      = 'ansible-playbooks'
     ANSIBLE_HOST_KEY_CHECKING = 'False'
-    VENV = '.venv-ansible'   // virtualenv directory created in workspace
+    VENV = '.venv-ansible'   // virtualenv directory created in workspace root
   }
 
   stages {
@@ -72,7 +72,7 @@ pipeline {
     stage('Ansible Configure (mandatory after apply)') {
       when { expression { params.ACTION == 'apply' } }
       steps {
-        // Build inventory & discover PEM
+        // 1) Build inventory from Terraform outputs and capture PEM path
         dir(env.TERRAFORM_DIR) {
           sh '''
             set -eux
@@ -119,68 +119,78 @@ PY
             else
               echo "" > ../ANSIBLE_PEM_PATH.txt
             fi
+
+            echo "Inventory written to: $(pwd)/ansible_inventory.ini"
           '''
         }
 
-        // ✅ Create venv RELIABLY and install Ansible
+        // 2) Create venv in WORKSPACE ROOT and install Ansible (robust: ensurepip + virtualenv fallback)
         sh '''
           set -eux
 
-          echo "Creating/repairing Python venv at: ${VENV}"
+          echo "Creating/repairing Python venv at: ${WORKSPACE}/${VENV}"
 
           # 1) Try standard venv if missing
-          if [ ! -d "${VENV}" ]; then
+          if [ ! -d "${WORKSPACE}/${VENV}" ]; then
             if python3 -c "import venv" 2>/dev/null; then
-              python3 -m venv "${VENV}" || true
+              python3 -m venv "${WORKSPACE}/${VENV}" || true
             fi
           fi
 
           # 2) If still missing, bootstrap ensurepip then retry venv
-          if [ ! -d "${VENV}" ]; then
+          if [ ! -d "${WORKSPACE}/${VENV}" ]; then
             python3 -m ensurepip --upgrade || true
             if python3 -c "import venv" 2>/dev/null; then
-              python3 -m venv "${VENV}" || true
+              python3 -m venv "${WORKSPACE}/${VENV}" || true
             fi
           fi
 
           # 3) Fallback: use virtualenv in user site
-          if [ ! -d "${VENV}" ]; then
+          if [ ! -d "${WORKSPACE}/${VENV}" ]; then
             python3 -m pip install --user --upgrade pip || true
             python3 -m pip install --user virtualenv || true
             USER_BASE="$(python3 -c "import site; print(site.USER_BASE)")"
             USER_BIN="${USER_BASE}/bin"
             if [ -x "${USER_BIN}/virtualenv" ]; then
-              "${USER_BIN}/virtualenv" "${VENV}"
+              "${USER_BIN}/virtualenv" "${WORKSPACE}/${VENV}"
             else
-              python3 -m virtualenv "${VENV}"
+              python3 -m virtualenv "${WORKSPACE}/${VENV}"
             fi
           fi
 
           # 4) Validate venv and ensure pip inside venv
-          if [ ! -x "${VENV}/bin/python" ]; then
-            echo "ERROR: venv Python not found at ${VENV}/bin/python"
-            ls -la "${VENV}" || true
+          if [ ! -x "${WORKSPACE}/${VENV}/bin/python" ]; then
+            echo "ERROR: venv Python not found at ${WORKSPACE}/${VENV}/bin/python"
+            ls -la "${WORKSPACE}/${VENV}" || true
             exit 1
           fi
-          "${VENV}/bin/python" -m ensurepip --upgrade || true
+          "${WORKSPACE}/${VENV}/bin/python" -m ensurepip --upgrade || true
 
           # Install Ansible in venv
-          "${VENV}/bin/python" -m pip install --upgrade pip
-          "${VENV}/bin/python" -m pip install --upgrade ansible
+          "${WORKSPACE}/${VENV}/bin/python" -m pip install --upgrade pip
+          "${WORKSPACE}/${VENV}/bin/python" -m pip install --upgrade ansible
 
           # Verify
-          "${VENV}/bin/ansible" --version
+          "${WORKSPACE}/${VENV}/bin/ansible" --version
+
+          # For clarity
+          ls -la "${WORKSPACE}/${VENV}/bin"
         '''
 
-        // Run Ansible; use generated PEM if available, else Jenkins SSH credential
+        // 3) Run Ansible; use ABSOLUTE PATH to ansible-playbook in venv
         script {
+          // Get PEM path from earlier step (written in workspace root)
           def pemPath = readFile(file: 'ANSIBLE_PEM_PATH.txt').trim()
+          def ansiblePlaybookBin = "${env.WORKSPACE}/${env.VENV}/bin/ansible-playbook"
+
           if (pemPath) {
             dir(env.ANSIBLE_DIR) {
               sh """
                 set -eux
+                test -x "${ansiblePlaybookBin}" || { echo "ansible-playbook not found at ${ansiblePlaybookBin}"; exit 1; }
                 test -f "../\${TERRAFORM_DIR}/ansible_inventory.ini" || { echo "Inventory not found"; exit 1; }
-                "${VENV}/bin/ansible-playbook" -i "../\${TERRAFORM_DIR}/ansible_inventory.ini" --private-key "${pemPath}" "${params.ANSIBLE_PLAYBOOK}"
+                echo "Running Ansible with generated PEM: ${pemPath}"
+                "${ansiblePlaybookBin}" -i "../\${TERRAFORM_DIR}/ansible_inventory.ini" --private-key "${pemPath}" "${params.ANSIBLE_PLAYBOOK}"
               """
             }
           } else {
@@ -188,8 +198,10 @@ PY
               dir(env.ANSIBLE_DIR) {
                 sh """
                   set -eux
+                  test -x "${ansiblePlaybookBin}" || { echo "ansible-playbook not found at ${ansiblePlaybookBin}"; exit 1; }
                   test -f "../\${TERRAFORM_DIR}/ansible_inventory.ini" || { echo "Inventory not found"; exit 1; }
-                  "${VENV}/bin/ansible-playbook" -i "../\${TERRAFORM_DIR}/ansible_inventory.ini" --private-key "\${SSH_KEY}" "${params.ANSIBLE_PLAYBOOK}"
+                  echo "Running Ansible with Jenkins SSH key credential: \${SSH_KEY}"
+                  "${ansiblePlaybookBin}" -i "../\${TERRAFORM_DIR}/ansible_inventory.ini" --private-key "\${SSH_KEY}" "${params.ANSIBLE_PLAYBOOK}"
                 """
               }
             }
