@@ -2,23 +2,27 @@ pipeline {
   agent any
 
   options {
-    ansiColor('xterm')
     timestamps()
+    // ansiColor removed as requested
   }
 
   parameters {
     string(name: 'AWS_REGION', defaultValue: 'ap-south-1', description: 'AWS region')
     string(name: 'ENVIRONMENT', defaultValue: 'production', description: 'Environment')
     string(name: 'PROJECT_NAME', defaultValue: 'devops-webapp', description: 'Project name')
+
+    // Your provided VPC ID as the default
     string(name: 'VPC_ID', defaultValue: 'vpc-0bb695c41dc9db0a4', description: 'Target VPC ID')
-    string(name: 'SUBNET_ID', defaultValue: '', description: 'Optional Subnet (leave empty to auto-pick)')
-    booleanParam(name: 'REUSE_EXISTING_SG', defaultValue: true, description: 'Reuse existing SG in VPC?')
+
+    string(name: 'SUBNET_ID', defaultValue: '', description: 'Optional Subnet (leave empty to auto-pick first subnet in VPC)')
+    booleanParam(name: 'REUSE_EXISTING_SG', defaultValue: true, description: 'Reuse existing SG in the VPC?')
     string(name: 'EXISTING_SG_NAME', defaultValue: 'web-server-sg', description: 'Existing SG name when reusing')
     string(name: 'KEYPAIR_NAME', defaultValue: 'deploy-key', description: 'EC2 key pair name')
-    string(name: 'ANSIBLE_USER', defaultValue: 'ubuntu', description: 'Ansible SSH user')
+    string(name: 'ANSIBLE_USER', defaultValue: 'ubuntu', description: 'Ansible SSH user (for your workflow)')
     string(name: 'INSTANCE_TYPE', defaultValue: 't3.micro', description: 'EC2 instance type')
     string(name: 'APACHE_INSTANCE_COUNT', defaultValue: '2', description: 'Apache instance count')
     string(name: 'NGINX_INSTANCE_COUNT', defaultValue: '2', description: 'Nginx instance count')
+
     choice(name: 'ACTION', choices: ['plan', 'apply', 'destroy'], description: 'Terraform action')
     booleanParam(name: 'AUTO_APPROVE', defaultValue: false, description: 'Auto-approve apply/destroy')
   }
@@ -34,7 +38,7 @@ pipeline {
       }
     }
 
-    stage('Terraform Init/Validate') {
+    stage('Terraform Init & Validate') {
       steps {
         sh """
           terraform fmt -recursive
@@ -44,9 +48,12 @@ pipeline {
       }
     }
 
-    stage('Terraform Plan/Apply/Destroy') {
+    stage('Terraform Plan / Apply / Destroy') {
       steps {
         script {
+          echo "Using VPC_ID: ${params.VPC_ID}"
+
+          // Build a consistent set of -var flags
           def tfVars = """
             -var='aws_region=${params.AWS_REGION}' \
             -var='environment=${params.ENVIRONMENT}' \
@@ -78,6 +85,7 @@ pipeline {
 
   post {
     always {
+      // archive state if present; ignore if not
       archiveArtifacts artifacts: '**/terraform.tfstate*', allowEmptyArchive: true
     }
   }
