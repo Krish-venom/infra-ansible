@@ -35,9 +35,9 @@ variable "project_name" {
 }
 
 variable "vpc_id" {
-  type    = string
+  type        = string
   description = "ID of the VPC to deploy into (e.g., vpc-xxxxxxxx)."
-  default = "vpc-0bb695c41dc9db0a4"
+  default     = "vpc-0bb695c41dc9db0a4"
 }
 
 variable "subnet_id" {
@@ -110,7 +110,6 @@ data "aws_subnets" "in_vpc" {
 }
 
 # Optionally reuse an existing security group by name in the same VPC
-# (Only looked up if var.reuse_existing_sg = true)
 data "aws_security_group" "existing_web" {
   count = var.reuse_existing_sg ? 1 : 0
 
@@ -149,7 +148,7 @@ data "aws_ami" "ubuntu" {
 ########################################
 # Derived Selections
 ########################################
-# Choose the subnet: use provided subnet_id if given; otherwise, the first subnet in the VPC.
+# Choose the subnet: use provided subnet_id if given; else first subnet in the VPC.
 locals {
   selected_subnet_id = var.subnet_id != "" ? var.subnet_id : (
     length(data.aws_subnets.in_vpc.ids) > 0 ? data.aws_subnets.in_vpc.ids[0] : ""
@@ -183,7 +182,7 @@ resource "aws_security_group" "web" {
     cidr_blocks = ["0.0.0.0/0"]
   }
 
-  # (Optional) Allow SSH - restrict this CIDR in production!
+  # (Optional) Allow SSH - restrict CIDR in production
   ingress {
     description = "SSH"
     from_port   = 22
@@ -222,7 +221,7 @@ resource "aws_instance" "apache" {
   key_name                    = var.keypair_name
   associate_public_ip_address = true
 
-  # Optionally, you can bootstrap Apache with user_data
+  # Optional Apache bootstrap
   # user_data = <<-EOT
   #   #!/bin/bash
   #   apt-get update -y
@@ -249,7 +248,7 @@ resource "aws_instance" "nginx" {
   key_name                    = var.keypair_name
   associate_public_ip_address = true
 
-  # Optionally, you can bootstrap Nginx with user_data
+  # Optional Nginx bootstrap
   # user_data = <<-EOT
   #   #!/bin/bash
   #   apt-get update -y
