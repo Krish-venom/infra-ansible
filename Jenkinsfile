@@ -76,7 +76,7 @@ pipeline {
         dir(env.TERRAFORM_DIR) {
           sh '''
             set -eux
-            # We will rely on venv for python later; this python3 check guards only the inventory generation.
+            # Need Python 3 to generate inventory (venv comes next).
             python3 --version >/dev/null 2>&1 || { echo "python3 not found on agent. Install python3."; exit 1; }
 
             terraform output -json > tf_outputs.json
@@ -120,21 +120,26 @@ PY
           '''
         }
 
-        // Create virtualenv and install Ansible (self-contained)
+        // ✅ Create virtualenv and install Ansible (the missing step before)
         sh '''
           set -eux
 
-          # ensure Python 3 & venv module
-          python3 -m venv --help >/dev/null 2>&1 || { echo "python3-venv not available. Please install python3-venv on the agent."; exit 1; }
+          # Ensure venv capability exists
+          python3 -m venv --help >/dev/null 2>&1 || { 
+            echo "python3-venv not available. Please install python3-venv (Ubuntu/Debian: apt-get install -y python3-venv)."; 
+            exit 1; 
+          }
 
-          # create venv if missing (at workspace/.venv-ansible)
+          # Create venv if missing
           if [ ! -d "${VENV}" ]; then
             python3 -m venv "${VENV}"
           fi
 
-          # upgrade pip & install/upgrade ansible
-          "${VENV}/bin/pip" install --upgrade pip
-          "${VENV}/bin/pip" install --upgrade ansible
+          # Use python -m pip to avoid pip path issues
+          "${VENV}/bin/python" -m pip install --upgrade pip
+          "${VENV}/bin/python" -m pip install --upgrade ansible
+
+          # Verify
           "${VENV}/bin/ansible" --version
         '''
 
