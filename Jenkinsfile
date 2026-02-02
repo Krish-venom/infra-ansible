@@ -7,7 +7,7 @@ pipeline {
     choice(name: 'ACTION', choices: ['plan', 'apply', 'destroy'], description: 'Terraform action to run')
     booleanParam(name: 'AUTO_APPROVE', defaultValue: true, description: 'Auto-approve apply/destroy')
 
-    // App to deploy (defaults to your Weather-site)
+    // Your app (Weather-site) defaults. If a trigger job passes different values, we’ll use those.
     string(name: 'APP_REPO_URL', defaultValue: 'https://github.com/Krish-venom/Weather-site.git', description: 'Git URL of the app to deploy')
     string(name: 'APP_BRANCH',   defaultValue: 'main', description: 'Branch to deploy')
 
@@ -30,50 +30,70 @@ pipeline {
     stage('Checkout (infra repo)') {
       steps {
         checkout scm
-        sh '''
+        sh """
           set -eux
-          echo "PWD: $(pwd)"
+          echo "PWD: \$(pwd)"
           ls -la
           echo "TF dir:"; ls -la "${TERRAFORM_DIR}" || true
           echo "Ansible dir:"; ls -la "${ANSIBLE_DIR}" || true
-        '''
+        """
       }
     }
 
     stage('Checkout Application (Weather-site)') {
       steps {
-        sh '''
-          set -eux
-          rm -rf "${APP_SRC}"
-          git clone --branch "${APP_BRANCH}" --depth 1 "${APP_REPO_URL}" "${APP_SRC}"
-          echo "App repo cloned to: ${APP_SRC}"
-          ls -la "${APP_SRC}" || true
-        '''
+        script {
+          // Compute safe defaults in Groovy, then export to the shell
+          def APP_REPO_URL_SAFE = (params.APP_REPO_URL?.trim()) ? params.APP_REPO_URL.trim() : 'https://github.com/Krish-venom/Weather-site.git'
+          def APP_BRANCH_SAFE   = (params.APP_BRANCH?.trim())   ? params.APP_BRANCH.trim()   : 'main'
+
+          withEnv([
+            "APP_REPO_URL=${APP_REPO_URL_SAFE}",
+            "APP_BRANCH=${APP_BRANCH_SAFE}",
+            "APP_SRC=${env.APP_SRC}"
+          ]) {
+            sh """
+              set -euo pipefail
+              echo "Cloning app: \${APP_REPO_URL} (branch=\${APP_BRANCH})"
+              rm -rf "\${APP_SRC}"
+              git clone --branch "\${APP_BRANCH}" --depth 1 "\${APP_REPO_URL}" "\${APP_SRC}"
+              ls -la "\${APP_SRC}" || true
+            """
+          }
+        }
       }
     }
 
     stage('Package Application') {
       steps {
-        sh '''
-          set -eux
-          rm -f "${ARTIFACT}"
-          tar --exclude='.git' -czf "${ARTIFACT}" -C "${APP_SRC}" .
-          ls -lh "${ARTIFACT}"
-        '''
+        withEnv([
+          "APP_SRC=${env.APP_SRC}",
+          "ARTIFACT=${env.ARTIFACT}"
+        ]) {
+          sh """
+            set -euo pipefail
+            rm -f "\${ARTIFACT}"
+            # Package the Weather-site (static HTML/CSS/JS) excluding .git
+            tar --exclude='.git' -czf "\${ARTIFACT}" -C "\${APP_SRC}" .
+            ls -lh "\${ARTIFACT}"
+          """
+        }
       }
     }
 
     stage('Terraform Init & Validate') {
       steps {
-        withCredentials([usernamePassword(credentialsId: 'aws_creds', usernameVariable: 'AWS_ACCESS_KEY_ID', passwordVariable: 'AWS_SECRET_ACCESS_KEY')]) {
+        withCredentials([usernamePassword(credentialsId: 'aws_creds',
+                                          usernameVariable: 'AWS_ACCESS_KEY_ID',
+                                          passwordVariable: 'AWS_SECRET_ACCESS_KEY')]) {
           dir(env.TERRAFORM_DIR) {
-            sh '''
+            sh """
               set -eux
-              test -n "$(ls -1 *.tf 2>/dev/null || true)" || { echo "No .tf files in $(pwd)"; exit 1; }
+              test -n "\$(ls -1 *.tf 2>/dev/null || true)" || { echo "No .tf files in \$(pwd)"; exit 1; }
               terraform fmt -recursive
               terraform init -input=false
               terraform validate
-            '''
+            """
           }
         }
       }
@@ -81,15 +101,17 @@ pipeline {
 
     stage('Terraform Plan / Apply / Destroy') {
       steps {
-        withCredentials([usernamePassword(credentialsId: 'aws_creds', usernameVariable: 'AWS_ACCESS_KEY_ID', passwordVariable: 'AWS_SECRET_ACCESS_KEY')]) {
+        withCredentials([usernamePassword(credentialsId: 'aws_creds',
+                                          usernameVariable: 'AWS_ACCESS_KEY_ID',
+                                          passwordVariable: 'AWS_SECRET_ACCESS_KEY')]) {
           dir(env.TERRAFORM_DIR) {
             script {
               if (params.ACTION == 'plan') {
                 sh 'set -eux; terraform plan -no-color'
               } else if (params.ACTION == 'apply') {
-                sh "set -eux; terraform apply -input=false -auto-approve -no-color"
+                sh 'set -eux; terraform apply -input=false -auto-approve -no-color'
               } else {
-                sh "set -eux; terraform destroy -input=false -auto-approve -no-color"
+                sh 'set -eux; terraform destroy -input=false -auto-approve -no-color'
               }
             }
           }
@@ -97,13 +119,13 @@ pipeline {
       }
     }
 
-    // Ansible is compulsory after apply
+    // Ansible is COMPULSORY after apply
     stage('Ansible Configure + Deploy (mandatory after apply)') {
       when { expression { params.ACTION == 'apply' } }
       steps {
         // 1) Build inventory & capture absolute PEM path (from Terraform outputs)
         dir(env.TERRAFORM_DIR) {
-          sh '''
+          sh """
             set -eux
             command -v python3 >/dev/null 2>&1 || { echo "python3 not found on agent. Install python3."; exit 1; }
             python3 --version
@@ -132,53 +154,53 @@ for ip in nginx_ips:
 open('ansible_inventory.ini', 'w').write("\\n".join(lines).strip()+"\\n")
 PY
 
-            GEN_PEM="$(terraform output -raw generated_private_key_path 2>/dev/null || true)"
-            if [ -n "${GEN_PEM}" ] && [ -f "${GEN_PEM}" ]; then
-              case "${GEN_PEM}" in
-                /*) echo "${GEN_PEM}" > ../ANSIBLE_PEM_PATH.txt ;;
-                *)  echo "$(pwd)/${GEN_PEM}" > ../ANSIBLE_PEM_PATH.txt ;;
+            GEN_PEM="\$(terraform output -raw generated_private_key_path 2>/dev/null || true)"
+            if [ -n "\${GEN_PEM}" ] && [ -f "\${GEN_PEM}" ]; then
+              case "\${GEN_PEM}" in
+                /*) echo "\${GEN_PEM}" > ../ANSIBLE_PEM_PATH.txt ;;
+                *)  echo "\$(pwd)/\${GEN_PEM}" > ../ANSIBLE_PEM_PATH.txt ;;
               esac
             else
               echo "" > ../ANSIBLE_PEM_PATH.txt
             fi
-          '''
+          """
         }
 
         // 2) Create venv at workspace root and install Ansible (robust)
-        sh '''
+        sh """
           set -eux
 
-          if [ ! -d "${WORKSPACE}/${VENV}" ]; then
+          if [ ! -d "\${WORKSPACE}/${VENV}" ]; then
             if python3 -c "import venv" 2>/dev/null; then
-              python3 -m venv "${WORKSPACE}/${VENV}" || true
+              python3 -m venv "\${WORKSPACE}/${VENV}" || true
             fi
           fi
-          if [ ! -d "${WORKSPACE}/${VENV}" ]; then
+          if [ ! -d "\${WORKSPACE}/${VENV}" ]; then
             python3 -m ensurepip --upgrade || true
             if python3 -c "import venv" 2>/dev/null; then
-              python3 -m venv "${WORKSPACE}/${VENV}" || true
+              python3 -m venv "\${WORKSPACE}/${VENV}" || true
             fi
           fi
-          if [ ! -d "${WORKSPACE}/${VENV}" ]; then
+          if [ ! -d "\${WORKSPACE}/${VENV}" ]; then
             python3 -m pip install --user --upgrade pip || true
             python3 -m pip install --user virtualenv || true
-            USER_BASE="$(python3 -c "import site; print(site.USER_BASE)")"
-            USER_BIN="${USER_BASE}/bin"
-            if [ -x "${USER_BIN}/virtualenv" ]; then
-              "${USER_BIN}/virtualenv" "${WORKSPACE}/${VENV}"
+            USER_BASE="\$(python3 -c "import site; print(site.USER_BASE)")"
+            USER_BIN="\${USER_BASE}/bin"
+            if [ -x "\${USER_BIN}/virtualenv" ]; then
+              "\${USER_BIN}/virtualenv" "\${WORKSPACE}/${VENV}"
             else
-              python3 -m virtualenv "${WORKSPACE}/${VENV}"
+              python3 -m virtualenv "\${WORKSPACE}/${VENV}"
             fi
           fi
 
-          test -x "${WORKSPACE}/${VENV}/bin/python" || { echo "venv Python missing"; exit 1; }
-          "${WORKSPACE}/${VENV}/bin/python" -m ensurepip --upgrade || true
-          "${WORKSPACE}/${VENV}/bin/python" -m pip install --upgrade pip
-          "${WORKSPACE}/${VENV}/bin/python" -m pip install --upgrade ansible
+          test -x "\${WORKSPACE}/${VENV}/bin/python" || { echo "venv Python missing"; exit 1; }
+          "\${WORKSPACE}/${VENV}/bin/python" -m ensurepip --upgrade || true
+          "\${WORKSPACE}/${VENV}/bin/python" -m pip install --upgrade pip
+          "\${WORKSPACE}/${VENV}/bin/python" -m pip install --upgrade ansible
 
-          ls -la "${WORKSPACE}/${VENV}/bin"
-          test -x "${WORKSPACE}/${VENV}/bin/ansible-playbook" || { echo "ansible-playbook missing"; exit 1; }
-        '''
+          ls -la "\${WORKSPACE}/${VENV}/bin"
+          test -x "\${WORKSPACE}/${VENV}/bin/ansible-playbook" || { echo "ansible-playbook missing"; exit 1; }
+        """
 
         // 3) Run Ansible (absolute paths for everything)
         script {
@@ -203,7 +225,9 @@ PY
                   -e artifact_path="${artifactAbs}"
               """
             } else {
-              withCredentials([sshUserPrivateKey(credentialsId: params.SSH_KEY_CRED_ID, keyFileVariable: 'SSH_KEY', usernameVariable: 'SSH_USER')]) {
+              withCredentials([sshUserPrivateKey(credentialsId: params.SSH_KEY_CRED_ID,
+                                                keyFileVariable: 'SSH_KEY',
+                                                usernameVariable: 'SSH_USER')]) {
                 sh """
                   set -eux
                   test -x "${ansiblePlaybook}" || { echo "ansible-playbook not found"; exit 1; }
@@ -212,7 +236,7 @@ PY
                   test -f "${artifactAbs}" || { echo "Artifact not found: ${artifactAbs}"; exit 1; }
 
                   "${ansiblePlaybook}" -i "${inventoryAbs}" \
-                    --private-key "\${SSH_KEY}" \
+                    --private-key "${SSH_KEY}" \
                     "${playbookAbs}" \
                     -e artifact_path="${artifactAbs}"
                 """
@@ -221,9 +245,9 @@ PY
           }
         }
 
-        // 4) Print & archive the URLs
+        // 4) Print & archive the web URLs
         dir(env.TERRAFORM_DIR) {
-          sh '''
+          sh """
             set -eux
             terraform output -json > tf_outputs.json
             python3 - <<'PY'
@@ -243,11 +267,11 @@ if nginx:
     lines.append("Nginx URLs:")
     lines += nginx
     lines.append("")
-content = "\n".join(lines).strip() or "No public URLs found."
+content = "\\n".join(lines).strip() or "No public URLs found."
 pathlib.Path("web-urls.txt").write_text(content+"\\n")
 print(content)
 PY
-          '''
+          """
         }
       }
     }
