@@ -9,6 +9,14 @@ terraform {
       source  = "hashicorp/aws"
       version = "~> 5.0"
     }
+    tls = {
+      source  = "hashicorp/tls"
+      version = "~> 4.0"
+    }
+    local = {
+      source  = "hashicorp/local"
+      version = "~> 2.4"
+    }
   }
 }
 
@@ -55,9 +63,24 @@ variable "existing_sg_name" {
   default = "web-server-sg"
 }
 
+# === Key pair management ===
 variable "keypair_name" {
   type    = string
   default = "deploy-key"
+}
+
+# If true, Terraform will create/manage the AWS key pair.
+variable "create_key_pair" {
+  type    = bool
+  default = true
+}
+
+# If you already have a public key (OpenSSH format), set it here (optional).
+# When set (and create_key_pair = true), Terraform will create the AWS key pair from this public key.
+# When empty and create_key_pair = true, Terraform will GENERATE a new key pair and save the private key PEM locally (0600).
+variable "public_key_openssh" {
+  type    = string
+  default = ""
 }
 
 variable "ansible_user" {
@@ -155,6 +178,41 @@ locals {
 }
 
 ########################################
+# Key Pair Management
+########################################
+
+# Generate a new RSA key only if:
+#  - create_key_pair = true
+#  - public_key_openssh is NOT provided (we will generate a new key then)
+resource "tls_private_key" "generated" {
+  count     = var.create_key_pair && var.public_key_openssh == "" ? 1 : 0
+  algorithm = "RSA"
+  rsa_bits  = 4096
+}
+
+# Create the AWS Key Pair from either provided public key or generated one
+resource "aws_key_pair" "this" {
+  count     = var.create_key_pair ? 1 : 0
+  key_name  = var.keypair_name
+  public_key = var.public_key_openssh != "" ?
+    var.public_key_openssh :
+    tls_private_key.generated[0].public_key_openssh
+}
+
+# If we generated a key (no public key provided), write the private key to a local file (0600)
+resource "local_file" "generated_pem" {
+  count           = var.create_key_pair && var.public_key_openssh == "" ? 1 : 0
+  filename        = "${path.module}/generated_${var.keypair_name}.pem"
+  content         = tls_private_key.generated[0].private_key_pem
+  file_permission = "0600"
+}
+
+# Decide which key name instances should use
+locals {
+  selected_key_name = var.create_key_pair ? aws_key_pair.this[0].key_name : var.keypair_name
+}
+
+########################################
 # Security Group (create new if not reusing)
 ########################################
 resource "aws_security_group" "web" {
@@ -217,17 +275,8 @@ resource "aws_instance" "apache" {
   instance_type               = var.instance_type
   subnet_id                   = local.selected_subnet_id
   vpc_security_group_ids      = [local.web_sg_id]
-  key_name                    = var.keypair_name
+  key_name                    = local.selected_key_name
   associate_public_ip_address = true
-
-  # Optional Apache bootstrap
-  # user_data = <<-EOT
-  #   #!/bin/bash
-  #   apt-get update -y
-  #   apt-get install -y apache2
-  #   systemctl enable apache2
-  #   systemctl start apache2
-  # EOT
 
   tags = merge(local.common_tags, {
     Name = "${var.project_name}-apache-${count.index + 1}-${var.environment}"
@@ -244,17 +293,8 @@ resource "aws_instance" "nginx" {
   instance_type               = var.instance_type
   subnet_id                   = local.selected_subnet_id
   vpc_security_group_ids      = [local.web_sg_id]
-  key_name                    = var.keypair_name
+  key_name                    = local.selected_key_name
   associate_public_ip_address = true
-
-  # Optional Nginx bootstrap
-  # user_data = <<-EOT
-  #   #!/bin/bash
-  #   apt-get update -y
-  #   apt-get install -y nginx
-  #   systemctl enable nginx
-  #   systemctl start nginx
-  # EOT
 
   tags = merge(local.common_tags, {
     Name = "${var.project_name}-nginx-${count.index + 1}-${var.environment}"
@@ -283,4 +323,21 @@ output "apache_public_ips" {
 output "nginx_public_ips" {
   description = "Public IPs of Nginx instances."
   value       = [for i in aws_instance.nginx : i.public_ip]
+}
+
+# Useful outputs for Jenkins/Ansible
+output "key_name_used" {
+  description = "Key pair name used by instances."
+  value       = local.selected_key_name
+}
+
+output "generated_private_key_path" {
+  description = "Path to the generated PEM (if Terraform generated a key). Empty otherwise."
+  value       = var.create_key_pair && var.public_key_openssh == "" ? local_file.generated_pem[0].filename : ""
+  sensitive   = false
+}
+
+output "ansible_user" {
+  description = "Default Ansible SSH user for the AMI."
+  value       = var.ansible_user
 }
