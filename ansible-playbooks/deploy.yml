@@ -1,16 +1,14 @@
 ---
 # deploy.yml
-# Vars expected:
-#   app_repo_url: Git URL of the app (default: https://github.com/Krish-venom/Weather-site.git)
-#   app_branch:   Branch to deploy (default: main)
+# Vars expected from Jenkins:
+#   app_repo_url: Git URL of the app
+#   app_branch:   Branch to deploy
 
 - name: Deploy to Apache instances
   hosts: apache
   become: true
   vars:
     apache_root: /var/www/html
-    app_repo_url: "https://github.com/Krish-venom/Weather-site.git"
-    app_branch: "main"
   tasks:
     - name: Install Apache and Git
       ansible.builtin.apt:
@@ -60,8 +58,6 @@
   become: true
   vars:
     nginx_root: /usr/share/nginx/html
-    app_repo_url: "https://github.com/Krish-venom/Weather-site.git"
-    app_branch: "main"
   tasks:
     - name: Install Nginx and Git
       ansible.builtin.apt:
