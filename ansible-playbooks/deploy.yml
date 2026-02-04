@@ -1,3 +1,9 @@
+---
+# deploy.yml
+# Vars expected:
+#   app_repo_url: Git URL of the app (default: https://github.com/Krish-venom/Weather-site.git)
+#   app_branch:   Branch to deploy (default: main)
+
 - name: Deploy to Apache instances
   hosts: apache
   become: true
@@ -15,7 +21,12 @@
         - apache2
         - git
 
-    - name: Ensure Apache root exists
+    - name: Remove Apache root (clean slate)
+      ansible.builtin.file:
+        path: "{{ apache_root }}"
+        state: absent
+
+    - name: Recreate Apache root
       ansible.builtin.file:
         path: "{{ apache_root }}"
         state: directory
@@ -23,19 +34,12 @@
         group: www-data
         mode: "0755"
 
-    - name: Clean Apache root
-      ansible.builtin.file:
-        path: "{{ item }}"
-        state: absent
-      with_fileglob:
-        - "{{ apache_root }}/*"
-
     - name: Clone application repo into Apache root
       ansible.builtin.git:
         repo: "{{ app_repo_url }}"
         dest: "{{ apache_root }}"
         version: "{{ app_branch }}"
-        force: true
+        force: yes
 
     - name: Set permissions for Apache root
       ansible.builtin.file:
@@ -48,5 +52,56 @@
     - name: Enable & restart Apache
       ansible.builtin.service:
         name: apache2
+        state: restarted
+        enabled: true
+
+- name: Deploy to Nginx instances
+  hosts: nginx
+  become: true
+  vars:
+    nginx_root: /usr/share/nginx/html
+    app_repo_url: "https://github.com/Krish-venom/Weather-site.git"
+    app_branch: "main"
+  tasks:
+    - name: Install Nginx and Git
+      ansible.builtin.apt:
+        name: "{{ item }}"
+        state: present
+        update_cache: true
+      loop:
+        - nginx
+        - git
+
+    - name: Remove Nginx root (clean slate)
+      ansible.builtin.file:
+        path: "{{ nginx_root }}"
+        state: absent
+
+    - name: Recreate Nginx root
+      ansible.builtin.file:
+        path: "{{ nginx_root }}"
+        state: directory
+        owner: www-data
+        group: www-data
+        mode: "0755"
+
+    - name: Clone application repo into Nginx root
+      ansible.builtin.git:
+        repo: "{{ app_repo_url }}"
+        dest: "{{ nginx_root }}"
+        version: "{{ app_branch }}"
+        force: yes
+
+    - name: Set permissions for Nginx root
+      ansible.builtin.file:
+        path: "{{ nginx_root }}"
+        owner: www-data
+        group: www-data
+        mode: "0755"
+        recurse: true
+
+    - name: Enable & restart Nginx
+      ansible.builtin.service:
+        name: nginx
         state: restarted
         enabled: true
