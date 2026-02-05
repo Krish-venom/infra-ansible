@@ -39,11 +39,12 @@ pipeline {
                                           usernameVariable: 'AWS_ACCESS_KEY_ID',
                                           passwordVariable: 'AWS_SECRET_ACCESS_KEY')]) {
           dir(env.TERRAFORM_DIR) {
-            sh '''#!/usr/bin/env bash
-set -Eeuo pipefail
+            sh '''
+bash -Eeuo pipefail <<'EOF'
 terraform fmt -recursive
 terraform init -input=false
 terraform validate
+EOF
 '''
           }
         }
@@ -58,21 +59,22 @@ terraform validate
           dir(env.TERRAFORM_DIR) {
             script {
               if (params.ACTION == 'plan') {
-                sh '''#!/usr/bin/env bash
-set -Eeuo pipefail
+                sh '''
+bash -Eeuo pipefail <<'EOF'
 terraform plan -no-color
+EOF
 '''
               } else if (params.ACTION == 'apply') {
                 def approveFlag = params.AUTO_APPROVE ? "-auto-approve" : ""
-                sh """#!/usr/bin/env bash
-set -Eeuo pipefail
+                sh """bash -Eeuo pipefail <<'EOF'
 terraform apply -input=false ${approveFlag} -no-color
+EOF
 """
               } else {
                 def approveFlag = params.AUTO_APPROVE ? "-auto-approve" : ""
-                sh """#!/usr/bin/env bash
-set -Eeuo pipefail
+                sh """bash -Eeuo pipefail <<'EOF'
 terraform destroy -input=false ${approveFlag} -no-color
+EOF
 """
               }
             }
@@ -85,8 +87,8 @@ terraform destroy -input=false ${approveFlag} -no-color
       when { expression { params.ACTION == 'apply' } }
       steps {
         dir(env.TERRAFORM_DIR) {
-          sh '''#!/usr/bin/env bash
-set -Eeuo pipefail
+          sh '''
+bash -Eeuo pipefail <<'EOF'
 terraform output -json > tf_outputs.json
 
 python3 - <<'PY'
@@ -115,15 +117,18 @@ if not apache_ips and not nginx_ips:
     print("No hosts discovered from Terraform outputs; inventory is empty.", file=sys.stderr)
     sys.exit(2)
 PY
+EOF
 '''
         }
 
-        sh '''#!/usr/bin/env bash
-set -Eeuo pipefail
+        // Create venv and install Ansible (version pinned)
+        sh '''
+bash -Eeuo pipefail <<'EOF'
 python3 -m venv "${WORKSPACE}/${VENV}"
 "${WORKSPACE}/${VENV}/bin/pip" install --upgrade pip
 # Pin major line to avoid sudden breaking changes
 "${WORKSPACE}/${VENV}/bin/pip" install "ansible>=9,<10"
+EOF
 '''
 
         script {
@@ -142,25 +147,25 @@ python3 -m venv "${WORKSPACE}/${VENV}"
           }
 
           if (pemPathAbs) {
-            sh """#!/usr/bin/env bash
-set -Eeuo pipefail
+            sh """bash -Eeuo pipefail <<'EOF'
 "${ansiblePlaybook}" -i "${inventoryAbs}" \\
   --private-key "${pemPathAbs}" \\
   "${playbookAbs}" \\
   -e app_repo_url="${params.APP_REPO_URL}" \\
   -e app_branch="${params.APP_BRANCH}"
+EOF
 """
           } else {
             withCredentials([sshUserPrivateKey(credentialsId: params.SSH_KEY_CRED_ID,
                                               keyFileVariable: 'SSH_KEY',
                                               usernameVariable: 'SSH_USER')]) {
-              sh """#!/usr/bin/env bash
-set -Eeuo pipefail
+              sh """bash -Eeuo pipefail <<'EOF'
 "${ansiblePlaybook}" -i "${inventoryAbs}" \\
   --private-key "${SSH_KEY}" \\
   "${playbookAbs}" \\
   -e app_repo_url="${params.APP_REPO_URL}" \\
   -e app_branch="${params.APP_BRANCH}"
+EOF
 """
             }
           }
