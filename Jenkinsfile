@@ -22,7 +22,7 @@ pipeline {
     ANSIBLE_DIR      = 'ansible-playbooks'
     ANSIBLE_HOST_KEY_CHECKING = 'False'
     VENV     = '.venv-ansible'
-    // Optionally set AWS_DEFAULT_REGION here if needed
+    // If your provider blocks don't set region, uncomment and set the region:
     // AWS_DEFAULT_REGION = 'ap-south-1'
   }
 
@@ -39,12 +39,12 @@ pipeline {
                                           usernameVariable: 'AWS_ACCESS_KEY_ID',
                                           passwordVariable: 'AWS_SECRET_ACCESS_KEY')]) {
           dir(env.TERRAFORM_DIR) {
-            sh '''
-              set -euo pipefail
-              terraform fmt -recursive
-              terraform init -input=false
-              terraform validate
-            '''
+            sh '''#!/usr/bin/env bash
+set -Eeuo pipefail
+terraform fmt -recursive
+terraform init -input=false
+terraform validate
+'''
           }
         }
       }
@@ -58,22 +58,22 @@ pipeline {
           dir(env.TERRAFORM_DIR) {
             script {
               if (params.ACTION == 'plan') {
-                sh '''
-                  set -euo pipefail
-                  terraform plan -no-color
-                '''
+                sh '''#!/usr/bin/env bash
+set -Eeuo pipefail
+terraform plan -no-color
+'''
               } else if (params.ACTION == 'apply') {
                 def approveFlag = params.AUTO_APPROVE ? "-auto-approve" : ""
-                sh """
-                  set -euo pipefail
-                  terraform apply -input=false ${approveFlag} -no-color
-                """
+                sh """#!/usr/bin/env bash
+set -Eeuo pipefail
+terraform apply -input=false ${approveFlag} -no-color
+"""
               } else {
                 def approveFlag = params.AUTO_APPROVE ? "-auto-approve" : ""
-                sh """
-                  set -euo pipefail
-                  terraform destroy -input=false ${approveFlag} -no-color
-                """
+                sh """#!/usr/bin/env bash
+set -Eeuo pipefail
+terraform destroy -input=false ${approveFlag} -no-color
+"""
               }
             }
           }
@@ -85,42 +85,49 @@ pipeline {
       when { expression { params.ACTION == 'apply' } }
       steps {
         dir(env.TERRAFORM_DIR) {
-          sh '''
-            set -euo pipefail
-            terraform output -json > tf_outputs.json
-            python3 - <<'PY'
+          sh '''#!/usr/bin/env bash
+set -Eeuo pipefail
+terraform output -json > tf_outputs.json
+
+python3 - <<'PY'
 import json, sys
-data = json.load(open('tf_outputs.json'))
+with open('tf_outputs.json') as f:
+    data = json.load(f)
+
 apache_ips = data.get('apache_public_ips', {}).get('value', []) or []
 nginx_ips  = data.get('nginx_public_ips', {}).get('value', []) or []
 ansible_user = data.get('ansible_user', {}).get('value', 'ubuntu')
+
 lines = []
 if apache_ips:
-  lines.append('[apache]')
-  for ip in apache_ips:
-    lines.append(f"{ip} ansible_user={ansible_user} ansible_ssh_common_args=-o StrictHostKeyChecking=no")
+    lines.append('[apache]')
+    for ip in apache_ips:
+        lines.append(f"{ip} ansible_user={ansible_user} ansible_ssh_common_args=-o StrictHostKeyChecking=no")
 if nginx_ips:
-  lines.append('[nginx]')
-  for ip in nginx_ips:
-    lines.append(f"{ip} ansible_user={ansible_user} ansible_ssh_common_args=-o StrictHostKeyChecking=no")
-open('ansible_inventory.ini','w').write("\\n".join(lines)+"\\n")
+    lines.append('[nginx]')
+    for ip in nginx_ips:
+        lines.append(f"{ip} ansible_user={ansible_user} ansible_ssh_common_args=-o StrictHostKeyChecking=no")
+
+with open('ansible_inventory.ini','w') as f:
+    f.write("\\n".join(lines) + "\\n")
+
 if not apache_ips and not nginx_ips:
-  print("No hosts discovered from Terraform outputs; inventory is empty.", file=sys.stderr)
-  sys.exit(2)
+    print("No hosts discovered from Terraform outputs; inventory is empty.", file=sys.stderr)
+    sys.exit(2)
 PY
-          '''
+'''
         }
 
-        sh '''
-          set -euo pipefail
-          python3 -m venv "${WORKSPACE}/${VENV}"
-          "${WORKSPACE}/${VENV}/bin/pip" install --upgrade pip
-          # Pin a major line to avoid breaking changes unexpectedly
-          "${WORKSPACE}/${VENV}/bin/pip" install "ansible>=9,<10"
-        '''
+        sh '''#!/usr/bin/env bash
+set -Eeuo pipefail
+python3 -m venv "${WORKSPACE}/${VENV}"
+"${WORKSPACE}/${VENV}/bin/pip" install --upgrade pip
+# Pin major line to avoid sudden breaking changes
+"${WORKSPACE}/${VENV}/bin/pip" install "ansible>=9,<10"
+'''
 
         script {
-          // Read optional PEM path if present, else use Jenkins credential
+          // Read optional PEM path if present (in workspace root), else use Jenkins credential
           def pemPathAbs = ''
           if (fileExists('ANSIBLE_PEM_PATH.txt')) {
             pemPathAbs = readFile(file: 'ANSIBLE_PEM_PATH.txt').trim()
@@ -130,33 +137,31 @@ PY
           def inventoryAbs     = "${env.WORKSPACE}/${env.TERRAFORM_DIR}/ansible_inventory.ini"
           def playbookAbs      = "${env.WORKSPACE}/${env.ANSIBLE_DIR}/${params.ANSIBLE_PLAYBOOK}"
 
-          // Fail early if playbook missing
           if (!fileExists(playbookAbs)) {
             error "Ansible playbook not found at ${playbookAbs}"
           }
 
-          // Execute Ansible
           if (pemPathAbs) {
-            sh """
-              set -euo pipefail
-              "${ansiblePlaybook}" -i "${inventoryAbs}" \\
-                --private-key "${pemPathAbs}" \\
-                "${playbookAbs}" \\
-                -e app_repo_url="${params.APP_REPO_URL}" \\
-                -e app_branch="${params.APP_BRANCH}"
-            """
+            sh """#!/usr/bin/env bash
+set -Eeuo pipefail
+"${ansiblePlaybook}" -i "${inventoryAbs}" \\
+  --private-key "${pemPathAbs}" \\
+  "${playbookAbs}" \\
+  -e app_repo_url="${params.APP_REPO_URL}" \\
+  -e app_branch="${params.APP_BRANCH}"
+"""
           } else {
             withCredentials([sshUserPrivateKey(credentialsId: params.SSH_KEY_CRED_ID,
                                               keyFileVariable: 'SSH_KEY',
                                               usernameVariable: 'SSH_USER')]) {
-              sh """
-                set -euo pipefail
-                "${ansiblePlaybook}" -i "${inventoryAbs}" \\
-                  --private-key "${SSH_KEY}" \\
-                  "${playbookAbs}" \\
-                  -e app_repo_url="${params.APP_REPO_URL}" \\
-                  -e app_branch="${params.APP_BRANCH}"
-              """
+              sh """#!/usr/bin/env bash
+set -Eeuo pipefail
+"${ansiblePlaybook}" -i "${inventoryAbs}" \\
+  --private-key "${SSH_KEY}" \\
+  "${playbookAbs}" \\
+  -e app_repo_url="${params.APP_REPO_URL}" \\
+  -e app_branch="${params.APP_BRANCH}"
+"""
             }
           }
         }
